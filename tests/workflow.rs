@@ -53,16 +53,26 @@ fn shell_words(line: &str) -> Vec<String> {
     words
 }
 
-/// The `apm ...` example lines of a guide section, as args without the leading `apm`.
+/// The example lines of a guide section, as args without the leading `apm`. The section runs
+/// from its heading to the next unindented line; every non-blank line in it must be a command.
 fn guide_examples(guide: &str, section: &str) -> Vec<Vec<String>> {
-    guide
-        .lines()
-        .skip_while(|l| *l != section)
-        .skip(1)
-        .take_while(|l| l.starts_with("  "))
-        .filter(|l| l.trim_start().starts_with("apm "))
-        .map(|l| shell_words(l).into_iter().skip(1).collect())
-        .collect()
+    let mut lines = guide.lines().skip_while(|l| *l != section);
+    assert!(lines.next().is_some(), "guide has no {section} section");
+    let examples: Vec<Vec<String>> = lines
+        .take_while(|l| l.is_empty() || l.starts_with(' '))
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let words = shell_words(l);
+            assert_eq!(
+                words.first().map(String::as_str),
+                Some("apm"),
+                "{section}: {l}"
+            );
+            words.into_iter().skip(1).collect()
+        })
+        .collect();
+    assert!(!examples.is_empty(), "{section} has no examples");
+    examples
 }
 
 #[test]
@@ -80,8 +90,6 @@ fn every_guide_example_runs_in_order() {
     let guide = env.json(&["guide"])["guide"].as_str().unwrap().to_string();
     let workflow = guide_examples(&guide, "WORKFLOW");
     let attrs = guide_examples(&guide, "CUSTOM ATTRIBUTES");
-    assert!(workflow.len() >= 10, "parsed too few: {workflow:?}");
-    assert!(attrs.len() >= 5, "parsed too few: {attrs:?}");
     for args in workflow.iter().chain(&attrs) {
         let out = env.apm().arg("--json").args(args).output().unwrap();
         assert!(
@@ -371,4 +379,16 @@ fn attr_rm_removes_values_from_show() {
         env.json_err(&["list", "--where", "points=2"]),
         "unknown attribute: points"
     );
+}
+
+#[test]
+fn guide_examples_reads_whole_sections() {
+    let guide = "A\n  apm one\n\n  apm two  # x\nB\n  apm three\n";
+    assert_eq!(guide_examples(guide, "A"), [vec!["one"], vec!["two"]]);
+}
+
+#[test]
+#[should_panic(expected = "A:   note")]
+fn guide_examples_rejects_non_commands() {
+    guide_examples("A\n  apm one\n  note\n", "A");
 }

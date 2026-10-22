@@ -213,7 +213,7 @@ pub fn item(conn: &Connection, reference: &str) -> Result<ItemRef> {
             |r| r.get(0),
         )
         .optional()?
-        .ok_or_else(|| err(format!("no such item: {key}-{seq}")))?;
+        .ok_or_else(|| err(format!("no such item: {}", item_key(&key, seq))))?;
     Ok(ItemRef { id, project_id })
 }
 

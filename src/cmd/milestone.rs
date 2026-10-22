@@ -178,7 +178,7 @@ fn clean_name(name: &str) -> Result<&str> {
 }
 
 /// The UNIQUE(project_id, name) error, for `db::unique`.
-fn exists(name: &str) -> crate::error::AppError {
+fn already_exists(name: &str) -> crate::error::AppError {
     err(format!("milestone already exists: {name}"))
 }
 
@@ -205,7 +205,7 @@ fn add(
             "INSERT INTO milestones (project_id, name, description, due) VALUES (?1, ?2, ?3, ?4)",
             params![project_id, name, description.unwrap_or_default(), due],
         ),
-        || exists(name),
+        || already_exists(name),
     )?;
     written(ctx, ctx.conn.last_insert_rowid(), "created")
 }
@@ -325,7 +325,7 @@ fn edit(
             ),
             params![id, rename, description, due.is_some(), due.flatten()],
         ),
-        || exists(rename.unwrap_or(name)),
+        || already_exists(rename.unwrap_or(name)),
     )?;
     written(ctx, id, "updated")
 }

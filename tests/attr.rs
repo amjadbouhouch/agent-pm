@@ -178,6 +178,12 @@ fn rm_deletes_attribute_and_values() {
     assert_eq!(v["name"], "note");
     assert_eq!(env.json(&["attr", "list", "-p", "APM"]), json!([]));
     assert_eq!(env.json(&["show", "APM-1"])["attributes"], json!({}));
+    // The rows are gone, not just hidden (show can't see orphans).
+    let left: i64 = env
+        .conn()
+        .query_row("SELECT count(*) FROM item_values", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(left, 0);
     // A new attribute of the same name starts empty.
     env.json(&["attr", "add", "note", "-p", "APM", "--type", "text"]);
     assert_eq!(env.json(&["show", "APM-1"])["attributes"], json!({}));

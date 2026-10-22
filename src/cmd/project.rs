@@ -97,7 +97,8 @@ fn add(ctx: &Ctx, key: &str, name: &str, description: Option<&str>) -> Result<()
         || err(format!("project already exists: {key}")),
     )?;
     let id = ctx.conn.last_insert_rowid();
-    print_written(ctx, &get(&ctx.conn, id)?, "created")
+    let project = get(&ctx.conn, id)?;
+    output::written(ctx.json, &project, &format!("created {}", project.key))
 }
 
 fn list(ctx: &Ctx) -> Result<()> {
@@ -162,7 +163,8 @@ fn edit(ctx: &Ctx, key: &str, name: Option<&str>, description: Option<&str>) -> 
         ),
         params![name, description, id],
     )?;
-    print_written(ctx, &get(&ctx.conn, id)?, "updated")
+    let project = get(&ctx.conn, id)?;
+    output::written(ctx.json, &project, &format!("updated {}", project.key))
 }
 
 fn rm(ctx: &Ctx, key: &str) -> Result<()> {
@@ -172,12 +174,7 @@ fn rm(ctx: &Ctx, key: &str) -> Result<()> {
     // Milestones, tasks, attributes, values and comments go with it (ON DELETE CASCADE).
     tx.execute("DELETE FROM projects WHERE id = ?1", params![id])?;
     tx.commit()?;
-    print_written(ctx, &project, "deleted")
-}
-
-/// `created APM`, or the project as JSON.
-fn print_written(ctx: &Ctx, project: &Project, verb: &str) -> Result<()> {
-    output::written(ctx.json, project, &format!("{verb} {}", project.key))
+    output::written(ctx.json, &project, &format!("deleted {}", project.key))
 }
 
 /// A project by id.
