@@ -1,7 +1,8 @@
 # AGENTS.md
 
 `apm` (agent-pm): one small executable that agents and humans use to track projects,
-milestones, tasks, subtasks, assignees and custom attributes. A mini Notion for the terminal.
+milestones, tasks, subtasks, assignees, tags, links, history, custom statuses and custom
+attributes. A mini Notion for the terminal.
 
 ## Principles
 
@@ -35,9 +36,14 @@ src/main.rs        parse args, run, print errors
 src/cli.rs         top-level clap definition (global flags, command enum)
 src/cmd/mod.rs     Ctx {conn, json, actor} and dispatch
 src/cmd/<group>.rs one module per command group: its clap args, its `run`, and
-                   functions other groups call (e.g. milestone::resolve, comment::for_item)
-src/db.rs          db path, schema migrations, shared lookups (project_id, item KEY-N)
-src/model.rs       Status, Priority, name=value parsing, date check
+                   functions other groups call (e.g. milestone::resolve, comment::for_item):
+                   project, item (add/list/show/edit/rm + shortcuts), milestone, attr,
+                   comment, status (custom statuses), link (link/unlink, blockers),
+                   tag (tags, `apm tags`), history (`apm history`), mv (`apm move`),
+                   guide (+ guide.txt), db
+src/db.rs          db path, schema migrations, SQL functions, shared lookups (project_id,
+                   item KEY-N, current_key), record_event
+src/model.rs       Category, Priority, name=value parsing, date and date-time (`parse_when`)
 src/output.rs      JSON printing, errors, text tables
 src/input.rs       long text from stdin or a file (bodies, comments): UTF-8, BOM, no tty
 tests/             integration tests (run the real binary on a temp DB)
@@ -53,8 +59,17 @@ scripts/           version-updater.cjs for commit-and-tag-version
   `KEY-N` (per-project sequence, never reused, `db::parse_item_key`). Case-insensitive on input.
   Old ids keep resolving: a re-keyed project's old KEY via `project_aliases`, a moved task's old
   `KEY-N` via `item_aliases`. Always look up through `db::project_id` / `db::item`; output shows
-  current ids only. A live key wins: creating or re-keying to a KEY drops the alias of that
-  name (`db::claim_project_key`), so a key is never both live and an alias.
+  current ids only: `db::current_key` when you only have a row id (queries may still join
+  `p.key || '-' || i.seq`). A live key wins: creating or re-keying to a KEY drops the alias of
+  that name (`db::claim_project_key`), so a key is never both live and an alias.
+- History: every task mutation records events with `db::record_event` inside its write
+  transaction (`db::write_tx`), one per real change (diff before/after, no-ops record
+  nothing). Pick an `EventKind`; a new kind is appended to the enum with a doc comment saying
+  what `field`/`old`/`new` hold. Values are stored as displayed (status name, KEY-N).
+- Text matching: SQLite's `lower`/`LIKE` fold ASCII only; use the `fold(text)` SQL function
+  (registered in `db.rs`) for case-insensitive matching of user text.
+- Text output is ASCII (`->`, `...`); user data is printed as given.
+  `text_output_is_ascii` in `tests/workflow.rs` checks it.
 - Database: `--db` > `$APM_DB` > `~/.agent-pm/apm.db`. Schema changes are a **new** entry
   appended to `MIGRATIONS` in `db.rs`; never edit a released one. Foreign keys are on.
   Timestamps are UTC ISO text written by SQLite defaults; set `updated_at` on every update.

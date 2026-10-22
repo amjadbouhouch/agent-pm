@@ -51,7 +51,7 @@ pub struct AddArgs {
     /// A status of the project (default: its first todo-category status)
     #[arg(long)]
     pub status: Option<String>,
-    /// Due date YYYY-MM-DD, or date-time YYYY-MM-DDTHH:MM[:SS] with Z or ±HH:MM (stored in UTC)
+    /// Due date YYYY-MM-DD, or date-time YYYY-MM-DDTHH:MM[:SS] with Z or +HH:MM/-HH:MM (stored in UTC)
     #[arg(long)]
     pub due: Option<String>,
     /// Longer description, Markdown by convention; `-` reads stdin

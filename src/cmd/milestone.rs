@@ -16,7 +16,7 @@ pub enum MilestoneCmd {
         project: String,
         #[arg(short, long)]
         description: Option<String>,
-        /// Due date YYYY-MM-DD, or date-time YYYY-MM-DDTHH:MM[:SS] with Z or ±HH:MM
+        /// Due date YYYY-MM-DD, or date-time YYYY-MM-DDTHH:MM[:SS] with Z or +HH:MM/-HH:MM
         #[arg(long)]
         due: Option<String>,
     },
