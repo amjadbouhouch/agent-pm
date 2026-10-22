@@ -12,7 +12,7 @@ use super::status::{self, Shortcut};
 use super::{Ctx, attr, comment, milestone};
 use crate::db::{self, EventKind};
 use crate::error::{Result, err};
-use crate::model::{Category, Priority, check_date, parse_pair};
+use crate::model::{Category, Priority, When, normalize_when, parse_pair, parse_when};
 use crate::output;
 
 #[derive(Args, Debug)]
@@ -40,7 +40,7 @@ pub struct AddArgs {
     /// A status of the project (default: its first todo-category status)
     #[arg(long)]
     pub status: Option<String>,
-    /// Due date, YYYY-MM-DD
+    /// Due date YYYY-MM-DD, or date-time YYYY-MM-DDTHH:MM[:SS] with Z or ±HH:MM (stored in UTC)
     #[arg(long)]
     pub due: Option<String>,
     /// Longer description
@@ -71,6 +71,37 @@ pub struct ListArgs {
     /// Include done and cancelled tasks
     #[arg(long)]
     pub all: bool,
+    #[command(flatten)]
+    pub power: ListPower,
+}
+
+/// `list` search, due filters, sort and limit (applied by `power_filters` and `sort_order`).
+#[derive(Args, Debug)]
+pub struct ListPower {
+    /// Case-insensitive substring of the title, body or a comment
+    #[arg(long, value_name = "TEXT")]
+    pub search: Option<String>,
+    /// Due strictly before WHEN (a date compares with the date part of date-time dues)
+    #[arg(long, value_name = "WHEN")]
+    pub due_before: Option<String>,
+    /// Due strictly after WHEN (a date compares with the date part of date-time dues)
+    #[arg(long, value_name = "WHEN")]
+    pub due_after: Option<String>,
+    /// Open tasks due before now (date dues: before today, UTC)
+    #[arg(long)]
+    pub overdue: bool,
+    /// Sort keys, comma-separated, `-` prefix = descending:
+    /// id created updated due priority status title (default: id)
+    #[arg(
+        long,
+        value_name = "KEYS",
+        value_delimiter = ',',
+        allow_hyphen_values = true
+    )]
+    pub sort: Vec<String>,
+    /// At most N tasks, after sorting
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+    pub limit: Option<u64>,
 }
 
 #[derive(Args, Debug)]
@@ -170,9 +201,7 @@ pub fn add(ctx: &Ctx, args: AddArgs) -> Result<()> {
             return Err(err("a project is required: pass -p KEY or --parent KEY-N"));
         }
     };
-    if let Some(due) = &args.due {
-        check_date(due)?;
-    }
+    let due = args.due.as_deref().map(normalize_when).transpose()?;
     let milestone_id = args
         .milestone
         .as_deref()
@@ -201,7 +230,7 @@ pub fn add(ctx: &Ctx, args: AddArgs) -> Result<()> {
             status_id,
             args.priority.unwrap_or(Priority::None).as_str(),
             args.assignee,
-            args.due,
+            due,
             ctx.actor,
         ],
     )?;
@@ -288,15 +317,20 @@ pub fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
             }
         }
     }
+    power_filters(&args.power, &mut conds, &mut vals)?;
+    let order = sort_order(&args.power.sort)?;
     let keep = attr::filter(conn, project_id, &args.filter)?;
     let cond = if conds.is_empty() {
         "1".to_string()
     } else {
         conds.join(" AND ")
     };
-    let mut items = query(conn, &cond, &vals)?;
+    let mut items = query_sorted(conn, &cond, &vals, &order)?;
     if let Some(keep) = keep {
         items.retain(|i| keep.contains(&i.row_id));
+    }
+    if let Some(n) = args.power.limit {
+        items.truncate(usize::try_from(n).unwrap_or(usize::MAX));
     }
     if ctx.json {
         return output::json(&items);
@@ -396,9 +430,7 @@ pub fn edit(ctx: &Ctx, args: EditArgs) -> Result<()> {
     if let Some(title) = &args.title {
         check_title(title)?;
     }
-    if let Some(due) = &args.due {
-        check_date(due)?;
-    }
+    let due = args.due.as_deref().map(normalize_when).transpose()?;
     let before = snapshot(&tx, item.id)?;
     let mut sets: Vec<String> = Vec::new();
     let mut vals: Vec<SqlValue> = Vec::new();
@@ -424,8 +456,8 @@ pub fn edit(ctx: &Ctx, args: EditArgs) -> Result<()> {
     if let Some(v) = &args.assignee {
         set("assignee", v.clone().into());
     }
-    if let Some(v) = &args.due {
-        set("due", v.clone().into());
+    if let Some(v) = due {
+        set("due", v.into());
     }
     if let Some(name) = &args.milestone {
         set(
@@ -534,7 +566,17 @@ pub fn get(conn: &Connection, id: i64) -> Result<Item> {
 /// Items matching a WHERE condition over `items i` (joined with `projects p`, `statuses s`,
 /// `milestones m` and the parent `par`), ordered by project key then number.
 pub fn query(conn: &Connection, cond: &str, vals: &[SqlValue]) -> Result<Vec<Item>> {
-    let sql = format!("{SELECT} WHERE {cond} ORDER BY p.key, i.seq");
+    query_sorted(conn, cond, vals, ID_ORDER)
+}
+
+/// `query` with an ORDER BY clause (see `sort_order`).
+fn query_sorted(
+    conn: &Connection,
+    cond: &str,
+    vals: &[SqlValue],
+    order: &str,
+) -> Result<Vec<Item>> {
+    let sql = format!("{SELECT} WHERE {cond} ORDER BY {order}");
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_from_iter(vals.iter()), |r| {
         Ok(Item {
@@ -665,4 +707,127 @@ fn canonical(reference: &str) -> String {
 fn bind(vals: &mut Vec<SqlValue>, v: impl Into<SqlValue>) -> String {
     vals.push(v.into());
     format!("?{}", vals.len())
+}
+
+// ---- list search, due filters and sort
+
+/// Task order by id: project key, then number. The last term of every `--sort`, so ties keep
+/// a stable order.
+const ID_ORDER: &str = "p.key, i.seq";
+
+/// `--sort` keys, in the order errors list them.
+const SORT_KEYS: &[&str] = &[
+    "id", "created", "updated", "due", "priority", "status", "title",
+];
+
+/// Add the `--search`, `--due-before`, `--due-after` and `--overdue` conditions.
+fn power_filters(p: &ListPower, conds: &mut Vec<String>, vals: &mut Vec<SqlValue>) -> Result<()> {
+    if let Some(text) = &p.search {
+        let mark = bind(vals, format!("%{}%", escape_like(text)));
+        let like = |col: &str| format!("{col} LIKE {mark} ESCAPE '\\'");
+        conds.push(format!(
+            "({} OR {} OR EXISTS (SELECT 1 FROM comments c WHERE c.item_id = i.id AND {}))",
+            like("i.title"),
+            like("i.body"),
+            like("c.body")
+        ));
+    }
+    for (bound, op) in [(&p.due_before, "<"), (&p.due_after, ">")] {
+        let Some(bound) = bound else { continue };
+        // A date bound compares with the date part of a date-time due; a date-time bound
+        // compares with the whole due, where a date sorts before every date-time on its day.
+        let cond = match parse_when(bound)? {
+            When::Date(d) => format!("substr(i.due, 1, 10) {op} {}", bind(vals, d)),
+            When::DateTime(t) => format!("i.due {op} {}", bind(vals, t)),
+        };
+        conds.push(cond);
+    }
+    if p.overdue {
+        let marks: Vec<String> = Category::value_variants()
+            .iter()
+            .filter(|c| c.is_closed())
+            .map(|c| bind(vals, c.as_str().to_string()))
+            .collect();
+        conds.push(format!(
+            "s.category NOT IN ({}) AND i.due < CASE WHEN length(i.due) = 10 \
+             THEN date('now') ELSE {} END",
+            marks.join(", "),
+            db::NOW_SQL
+        ));
+    }
+    Ok(())
+}
+
+/// `%`, `_` and `\` matched literally by `LIKE ... ESCAPE '\'`.
+fn escape_like(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '%' | '_' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// The ORDER BY clause for `--sort` keys, ending with the id order.
+fn sort_order(keys: &[String]) -> Result<String> {
+    let mut terms = Vec::new();
+    for key in keys {
+        let key = key.trim();
+        let (name, dir) = match key.strip_prefix('-') {
+            Some(name) => (name, " DESC"),
+            None => (key, ""),
+        };
+        let term = match name.to_lowercase().as_str() {
+            "id" => format!("p.key{dir}, i.seq{dir}"),
+            "created" => format!("i.created_at{dir}"),
+            "updated" => format!("i.updated_at{dir}"),
+            // Tasks without a due date come last in both directions.
+            "due" => format!("i.due IS NULL, i.due{dir}"),
+            "priority" => format!(
+                "CASE i.priority WHEN 'urgent' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 \
+                 WHEN 'low' THEN 1 ELSE 0 END{dir}"
+            ),
+            // Positions are per project; equal positions fall through to the id order.
+            "status" => format!("s.position{dir}"),
+            "title" => format!("i.title COLLATE NOCASE{dir}"),
+            _ => {
+                return Err(err(format!(
+                    "unknown sort key: {key} (valid: {})",
+                    SORT_KEYS.join(", ")
+                )));
+            }
+        };
+        terms.push(term);
+    }
+    terms.push(ID_ORDER.to_string());
+    Ok(terms.join(", "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn like_escapes() {
+        assert_eq!(escape_like(r"100%_a\b"), r"100\%\_a\\b");
+        assert_eq!(escape_like("plain"), "plain");
+    }
+
+    #[test]
+    fn sort_orders() {
+        let keys = |k: &[&str]| sort_order(&k.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(keys(&[]).unwrap(), "p.key, i.seq");
+        assert_eq!(
+            keys(&["-due", "Title"]).unwrap(),
+            "i.due IS NULL, i.due DESC, i.title COLLATE NOCASE, p.key, i.seq"
+        );
+        assert_eq!(
+            keys(&["size"]).unwrap_err().0,
+            "unknown sort key: size (valid: id, created, updated, due, priority, status, title)"
+        );
+        assert!(keys(&["-"]).is_err());
+        assert!(keys(&[""]).is_err());
+    }
 }

@@ -83,10 +83,7 @@ pub fn check_date(s: &str) -> Result<()> {
     Ok(())
 }
 
-// `When` and `parse_when` are wired into due dates and attributes by the list-power slice (B1).
-
 /// A "when" value: a date, or a date-time normalized to UTC.
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum When {
     /// `YYYY-MM-DD`, as given.
@@ -95,7 +92,6 @@ pub enum When {
     DateTime(String),
 }
 
-#[allow(dead_code)]
 impl When {
     /// The stored form. As text, a date sorts before every date-time on the same day.
     pub fn as_str(&self) -> &str {
@@ -108,7 +104,6 @@ impl When {
 /// Parse `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM[:SS]` followed by `Z` or `±HH:MM`.
 /// Date-times are converted to UTC; a date-time without a zone is an error (there is no tz
 /// database to guess one from).
-#[allow(dead_code)]
 pub fn parse_when(s: &str) -> Result<When> {
     let bad = || {
         err(format!(
@@ -160,6 +155,11 @@ pub fn parse_when(s: &str) -> Result<When> {
         min / 60,
         min % 60
     )))
+}
+
+/// A "when" value in its stored form: task and milestone `due`, `datetime` attributes.
+pub fn normalize_when(s: &str) -> Result<String> {
+    parse_when(s).map(|w| w.as_str().to_string())
 }
 
 /// Days since 1970-01-01 for a proleptic Gregorian date (Howard Hinnant's algorithm).

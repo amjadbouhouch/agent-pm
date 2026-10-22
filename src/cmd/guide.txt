@@ -27,6 +27,9 @@ WORKFLOW
   apm list -p APM -a alice                           # open tasks only
   apm list -p APM --status done,cancelled            # explicit statuses
   apm list -m v1 --all                               # include done/cancelled
+  apm list --search "clap" --sort -priority,due --limit 5   # title, body, comments
+  apm list --overdue                                 # open tasks due before now
+  apm edit APM-2 --due 2026-11-20T17:00+01:00        # stored in UTC
   apm show APM-1                                     # fields, subtasks, attrs, comments
   apm edit APM-1 --priority urgent --unset due
   apm milestone list -p APM                          # progress done/total
@@ -34,7 +37,7 @@ WORKFLOW
 
 CUSTOM ATTRIBUTES
   apm attr add size -p APM --type select --options s,m,l
-  apm attr add points -p APM --type number           # types: text number select date checkbox
+  apm attr add points -p APM --type number    # types: text number select date datetime checkbox
   apm add "cache layer" -p APM --set size=m --set points=3
   apm list -p APM --where size=m
   apm edit APM-3 --unset points
@@ -52,12 +55,16 @@ VALUES
   Category: todo | active | done | cancelled. New tasks get the first todo status;
             start = first active, done = first done, block = the status named blocked.
   Priority: none (default) | low | medium | high | urgent
-  Dates:    YYYY-MM-DD. Checkbox: true/false/yes/no/1/0.
+  Due:      YYYY-MM-DD, or YYYY-MM-DDTHH:MM[:SS] with Z or ±HH:MM (stored as UTC ...Z).
+            A date bound (--due-before/--due-after) compares the date part of a due.
+  Sort:     id created updated due priority status title; -key = descending; no due last.
+  Checkbox: true/false/yes/no/1/0. Date attributes: YYYY-MM-DD; datetime: like due.
   `list` hides done/cancelled-category tasks unless --all or --status.
 
 COMMANDS
   project add|list|show|edit|rm   manage projects (rm deletes everything in it)
   add | list | show | edit | rm   tasks; filters: -p --status -a -m --parent --where
+                                  --search --due-before --due-after --overdue; --sort --limit
   start | done | block            status shortcuts
   status list|add|edit|rm         custom statuses, -p KEY; a project keeps at least one
   milestone add|list|show|edit|close|reopen|rm   -p KEY; rm keeps its tasks

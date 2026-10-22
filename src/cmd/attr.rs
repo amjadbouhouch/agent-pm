@@ -16,6 +16,7 @@ pub enum AttrType {
     Number,
     Select,
     Date,
+    Datetime,
     Checkbox,
 }
 
@@ -26,6 +27,7 @@ impl AttrType {
             AttrType::Number => "number",
             AttrType::Select => "select",
             AttrType::Date => "date",
+            AttrType::Datetime => "datetime",
             AttrType::Checkbox => "checkbox",
         }
     }
@@ -127,6 +129,8 @@ impl Attr {
                 model::check_date(value).map_err(|e| bad(e.0))?;
                 Ok(value.to_string())
             }
+            // A date or a date-time, as for `due`; date-times are stored in UTC.
+            AttrType::Datetime => model::normalize_when(value).map_err(|e| bad(e.0)),
             AttrType::Checkbox => match value.to_lowercase().as_str() {
                 "true" | "yes" | "1" => Ok("true".to_string()),
                 "false" | "no" | "0" => Ok("false".to_string()),
@@ -437,6 +441,7 @@ mod tests {
                 (1, 'size', 'select', '["s","m","l"]'),
                 (1, 'when', 'date', '[]'),
                 (1, 'flag', 'checkbox', '[]'),
+                (1, 'at', 'datetime', '[]'),
                 (2, 'points', 'number', '[]');
             "#,
         )
@@ -601,6 +606,44 @@ mod tests {
         );
         assert_eq!(
             filter(&conn, Some(1), &pairs(&[("points", "-0.0")])).unwrap(),
+            ids(&[1])
+        );
+    }
+
+    #[test]
+    fn datetimes_normalize_to_utc() {
+        let conn = setup();
+        let e = |name: &str, value: &str| set_values(&conn, 1, 1, &pairs(&[(name, value)])).err();
+        assert!(
+            e("at", "2026-10-22T09:30")
+                .unwrap()
+                .0
+                .contains("add Z or an offset")
+        );
+        assert!(
+            e("at", "2026-10-22T25:00Z")
+                .unwrap()
+                .0
+                .contains("invalid value for at")
+        );
+        assert!(
+            e("when", "2026-10-22T09:30Z")
+                .unwrap()
+                .0
+                .contains("invalid date")
+        );
+        set_values(&conn, 1, 1, &pairs(&[("at", " 2026-10-22T09:30+02:00 ")])).unwrap();
+        assert_eq!(
+            values_for_item(&conn, 1).unwrap()["at"],
+            json!("2026-10-22T07:30:00Z")
+        );
+        set_values(&conn, 1, 2, &pairs(&[("at", "2026-10-22")])).unwrap();
+        assert_eq!(
+            values_for_item(&conn, 2).unwrap()["at"],
+            json!("2026-10-22")
+        );
+        assert_eq!(
+            filter(&conn, Some(1), &pairs(&[("at", "2026-10-22T08:30+01:00")])).unwrap(),
             ids(&[1])
         );
     }

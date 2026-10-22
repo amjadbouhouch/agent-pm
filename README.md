@@ -45,6 +45,8 @@ apm add "flag tests" --parent APM-1       # subtask
 apm start APM-1
 apm comment APM-1 "clap derive works"
 apm list -p APM
+apm list --search "clap" --sort -priority,due --limit 5
+apm list --overdue                        # open tasks due before now
 apm --json show APM-1
 ```
 
@@ -55,11 +57,11 @@ Data lives in `~/.agent-pm/apm.db`; override with `--db PATH` or `$APM_DB`.
 | Command | What it does |
 | --- | --- |
 | `project add\|list\|show\|edit\|rm` | Projects, each with a short KEY (`APM`) |
-| `add`, `list`, `show`, `edit`, `rm` | Tasks and subtasks, referenced as `KEY-N` |
+| `add`, `list`, `show`, `edit`, `rm` | Tasks and subtasks, referenced as `KEY-N`; `list` filters, searches (`--search`), sorts (`--sort`), limits and filters by due (`--due-before`, `--due-after`, `--overdue`) |
 | `start`, `done`, `block` | Status shortcuts |
 | `status list\|add\|edit\|rm` | Custom statuses per project, each in a category (todo, active, done, cancelled) |
 | `milestone add\|list\|show\|edit\|close\|reopen\|rm` | Milestones with progress |
-| `attr add\|list\|rm` | Custom attributes (text, number, select, date, checkbox), set with `--set`, filtered with `--where` |
+| `attr add\|list\|rm` | Custom attributes (text, number, select, date, datetime, checkbox), set with `--set`, filtered with `--where` |
 | `comment KEY-N TEXT` | Comment on a task |
 | `guide` | Compact usage guide for agents |
 | `db` | Database path and schema version |
@@ -78,8 +80,13 @@ re-work", ...). Each status belongs to a category (todo, active, done, cancelled
 decides what `list` hides, how milestone progress counts, and where `start`/`done` go.
 
 On top of those, a project can declare **custom attributes** when it needs more —
-Notion-style properties such as text, number, select, date, or checkbox — without
-changing the tool itself.
+Notion-style properties such as text, number, select, date, datetime or checkbox —
+without changing the tool itself.
+
+Due dates (tasks and milestones) and `datetime` attributes take a date (`2026-11-20`) or a
+date-time with a zone (`2026-11-20T17:00+01:00`, `...Z`), stored in UTC. Date-times without a
+zone are rejected. In `list --due-before/--due-after`, a date bound compares the date part
+of a due; `--overdue` is open tasks due before now (date dues: before today, UTC).
 
 ## License
 
