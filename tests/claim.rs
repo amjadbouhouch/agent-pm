@@ -727,3 +727,28 @@ fn a_claim_on_a_closed_task_is_never_live() {
     let v = as_(&env, "alice", &["release", "APM-1"]);
     assert_eq!(v["claim"], Value::Null);
 }
+
+#[test]
+fn export_import_drops_live_claims_and_next_works_after_import() {
+    let src = env_tasks(2);
+    as_(&src, "alice", &["claim", "APM-1"]);
+    let file = src.dir.path().join("apm.json");
+    src.json(&["export", "-o", file.to_str().unwrap()]);
+
+    let dst = Env::new();
+    dst.json(&["import", file.to_str().unwrap(), "--key", "NEW"]);
+    let t1 = dst.json(&["show", "NEW-1"]);
+    assert_eq!(t1["claim"], Value::Null, "claims are not exported");
+    // History keeps the claim event (the KEY in its text is the one it had then).
+    let kinds: Vec<String> = dst
+        .json(&["history", "NEW-1"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap().to_string())
+        .collect();
+    assert!(kinds.contains(&"claimed".to_string()));
+    let got = as_(&dst, "bob", &["next", "-p", "NEW"]);
+    assert_eq!(got["task"]["id"], "NEW-1");
+    assert_eq!(got["renewed"], json!(false));
+}

@@ -359,6 +359,25 @@ pub enum EventKind {
 }
 
 impl EventKind {
+    const ALL: [EventKind; 11] = [
+        EventKind::Created,
+        EventKind::Changed,
+        EventKind::Attr,
+        EventKind::Commented,
+        EventKind::Moved,
+        EventKind::Linked,
+        EventKind::Unlinked,
+        EventKind::Tagged,
+        EventKind::Untagged,
+        EventKind::Claimed,
+        EventKind::Released,
+    ];
+
+    /// The kind stored as `s`, if apm knows it (used to validate imported history).
+    pub fn parse(s: &str) -> Option<EventKind> {
+        EventKind::ALL.into_iter().find(|k| k.as_str() == s)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             EventKind::Created => "created",

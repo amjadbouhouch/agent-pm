@@ -533,6 +533,10 @@ fn import_rejects_broken_files() {
             "APM-1: no such status: nope",
         ),
         (
+            &|v| v["projects"][0]["tasks"][0]["events"][0]["kind"] = "bogus".into(),
+            "APM-1: unknown event kind: \"bogus\"",
+        ),
+        (
             &|v| v["projects"][0]["tasks"][1]["milestone"] = "v9".into(),
             "APM-2: no such milestone: v9",
         ),
