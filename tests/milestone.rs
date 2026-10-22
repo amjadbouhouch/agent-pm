@@ -1,29 +1,19 @@
 mod common;
 
 use common::Env;
-use rusqlite::params;
 
-/// Seed project APM (projects commands live in another slice).
-fn project(env: &Env, key: &str) -> i64 {
-    let conn = env.conn();
-    conn.execute(
-        "INSERT INTO projects (key, name) VALUES (?1, ?1)",
-        params![key],
-    )
-    .unwrap();
-    conn.last_insert_rowid()
+/// Create project `key`.
+fn project(env: &Env, key: &str) {
+    env.json(&["project", "add", key, key]);
 }
 
-/// Seed task APM-<seq> with a status, in milestone `name`.
-fn task(env: &Env, seq: i64, title: &str, status: &str, milestone: Option<&str>) {
-    let conn = env.conn();
-    conn.execute(
-        "INSERT INTO items (project_id, seq, milestone_id, title, status, assignee, created_by)
-         VALUES ((SELECT id FROM projects WHERE key = 'APM'), ?1,
-                 (SELECT id FROM milestones WHERE name = ?2), ?3, ?4, 'ann', 'tester')",
-        params![seq, milestone, title, status],
-    )
-    .unwrap();
+/// Add the next APM task, assigned to ann, with a status and an optional milestone.
+fn task(env: &Env, title: &str, status: &str, milestone: Option<&str>) {
+    let mut args = vec!["add", title, "-p", "APM", "-a", "ann", "--status", status];
+    if let Some(m) = milestone {
+        args.extend(["-m", m]);
+    }
+    env.json(&args);
 }
 
 #[test]
@@ -124,10 +114,10 @@ fn list_shows_open_with_progress() {
         "2026-01-01",
     ]);
     env.json(&["milestone", "close", "old", "-p", "APM"]);
-    task(&env, 1, "a", "done", Some("v1"));
-    task(&env, 2, "b", "todo", Some("v1"));
-    task(&env, 3, "c", "cancelled", Some("v1"));
-    task(&env, 4, "d", "doing", None);
+    task(&env, "a", "done", Some("v1"));
+    task(&env, "b", "todo", Some("v1"));
+    task(&env, "c", "cancelled", Some("v1"));
+    task(&env, "d", "doing", None);
 
     let v = env.json(&["milestone", "list", "-p", "APM"]);
     let names: Vec<&str> = v
@@ -180,9 +170,9 @@ fn show_includes_tasks_in_order() {
     let env = Env::new();
     project(&env, "APM");
     env.json(&["milestone", "add", "v1", "-p", "APM"]);
-    task(&env, 2, "second", "todo", Some("v1"));
-    task(&env, 1, "first", "done", Some("v1"));
-    task(&env, 3, "elsewhere", "todo", None);
+    task(&env, "first", "done", Some("v1"));
+    task(&env, "second", "todo", Some("v1"));
+    task(&env, "elsewhere", "todo", None);
 
     let v = env.json(&["milestone", "show", "v1", "-p", "apm"]);
     assert_eq!(v["name"], "v1");
@@ -333,18 +323,15 @@ fn rm_keeps_tasks() {
     let env = Env::new();
     project(&env, "APM");
     env.json(&["milestone", "add", "v1", "-p", "APM"]);
-    task(&env, 1, "a", "todo", Some("v1"));
+    task(&env, "a", "todo", Some("v1"));
     let v = env.json(&["milestone", "rm", "v1", "-p", "APM"]);
     assert_eq!(v["name"], "v1");
     assert_eq!(v["progress"]["total"], 1);
 
-    let conn = env.conn();
-    let milestone: Option<i64> = conn
-        .query_row("SELECT milestone_id FROM items WHERE seq = 1", [], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    assert_eq!(milestone, None);
+    assert_eq!(
+        env.json(&["show", "APM-1"])["milestone"],
+        serde_json::Value::Null
+    );
     assert_eq!(
         env.json_err(&["milestone", "show", "v1", "-p", "APM"]),
         "no such milestone: v1"

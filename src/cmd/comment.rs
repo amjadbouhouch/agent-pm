@@ -52,19 +52,17 @@ pub fn run(ctx: &Ctx, args: CommentArgs) -> Result<()> {
     )?;
     let id = tx.last_insert_rowid();
     tx.execute(
-        "UPDATE items SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?1",
+        &format!(
+            "UPDATE items SET updated_at = {} WHERE id = ?1",
+            db::NOW_SQL
+        ),
         params![item.id],
     )?;
     tx.commit()?;
     let c = ctx
         .conn
         .query_row(&format!("{SELECT} WHERE c.id = ?1"), params![id], row)?;
-    if ctx.json {
-        output::json(&c)
-    } else {
-        println!("commented on {}", c.item);
-        Ok(())
-    }
+    output::written(ctx.json, &c, &format!("commented on {}", c.item))
 }
 
 /// A task's comments, oldest first. Used by `show`.

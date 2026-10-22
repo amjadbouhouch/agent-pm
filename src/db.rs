@@ -4,7 +4,11 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::error::{Result, err};
+use crate::error::{AppError, Result, err};
+
+/// SQL for the current UTC time, in the format the schema's timestamp defaults use.
+/// For `updated_at = {NOW_SQL}` in updates.
+pub const NOW_SQL: &str = "strftime('%Y-%m-%dT%H:%M:%SZ', 'now')";
 
 /// `--db` > `$APM_DB` > `~/.agent-pm/apm.db`.
 pub fn path(flag: Option<&Path>) -> Result<PathBuf> {
@@ -141,6 +145,24 @@ pub fn project_id(conn: &Connection, key: &str) -> Result<i64> {
     .ok_or_else(|| err(format!("no such project: {}", key.to_uppercase())))
 }
 
+/// Map a write's UNIQUE-constraint failure to `exists()` (e.g. `project already exists: X`).
+/// The constraint, not a pre-check, decides: several agents may write at once.
+pub fn unique<T>(res: rusqlite::Result<T>, exists: impl FnOnce() -> AppError) -> Result<T> {
+    match res {
+        Err(rusqlite::Error::SqliteFailure(e, _))
+            if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
+        {
+            Err(exists())
+        }
+        res => Ok(res?),
+    }
+}
+
+/// A task's `KEY-N` reference, e.g. `APM-12`.
+pub fn item_key(key: &str, seq: i64) -> String {
+    format!("{key}-{seq}")
+}
+
 /// An item found by its `KEY-N` reference.
 #[derive(Debug, Clone, Copy)]
 pub struct ItemRef {
@@ -191,7 +213,7 @@ pub fn item(conn: &Connection, reference: &str) -> Result<ItemRef> {
             |r| r.get(0),
         )
         .optional()?
-        .ok_or_else(|| err(format!("no such item: {key}-{seq}")))?;
+        .ok_or_else(|| err(format!("no such item: {}", item_key(&key, seq))))?;
     Ok(ItemRef { id, project_id })
 }
 
@@ -202,6 +224,7 @@ mod tests {
     #[test]
     fn item_keys() {
         assert_eq!(parse_item_key("apm-12").unwrap(), ("APM".to_string(), 12));
+        assert_eq!(item_key("APM", 12), "APM-12");
         assert!(parse_item_key("MY-APP-3").is_err());
         assert!(parse_item_key("APM-+3").is_err());
         assert!(parse_item_key("APM").is_err());

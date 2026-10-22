@@ -144,11 +144,9 @@ fn rm_deletes_the_project_and_its_tasks() {
     let p = env.json(&["project", "rm", "apm"]);
     assert_eq!(p["key"], "APM");
     assert_eq!(env.json_err(&["show", "APM-1"]), "no such project: APM");
-    let n: i64 = env
-        .conn()
-        .query_row("SELECT count(*) FROM items", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(n, 1);
+    let left = env.json(&["list", "--all"]);
+    assert_eq!(left.as_array().unwrap().len(), 1);
+    assert_eq!(left[0]["id"], "OTHER-1");
     assert_eq!(
         env.json_err(&["project", "rm", "APM"]),
         "no such project: APM"

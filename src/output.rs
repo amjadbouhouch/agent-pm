@@ -8,6 +8,15 @@ pub fn json<T: Serialize + ?Sized>(value: &T) -> Result<()> {
     Ok(())
 }
 
+/// A write's result: the written object under `--json`, else one line (`created APM-3`).
+pub fn written<T: Serialize + ?Sized>(json: bool, value: &T, line: &str) -> Result<()> {
+    if json {
+        return self::json(value);
+    }
+    println!("{line}");
+    Ok(())
+}
+
 /// Errors go to stderr: `error: <msg>`, or `{"error": "<msg>"}` under `--json`.
 pub fn print_error(e: &AppError, json: bool) {
     if json {
