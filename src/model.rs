@@ -2,12 +2,14 @@
 //! dates and date-times.
 
 use clap::ValueEnum;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, err};
 
 /// The group a project's custom status belongs to. Statuses are rows (`cmd::status`);
 /// what a status means to `list`, milestone progress and the shortcuts comes from this.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Category {
     Todo,
     Active,
@@ -31,7 +33,8 @@ impl Category {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Priority {
     None,
     Low,

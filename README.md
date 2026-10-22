@@ -126,7 +126,8 @@ part of a due; `--overdue` is open tasks due before now (date dues: before today
 
 `apm backup` copies the whole database, safely while agents write to it, to
 `~/.agent-pm/backups/apm-<UTC time>.db` (or `backups/` next to a `--db`/`$APM_DB` file) and
-prints the path; `--keep 7` then deletes all but the 7 newest backups there. Pass a path to
+prints the path; `--keep 7` then deletes all but the 7 newest backups it made there (other
+files are left alone). Pass a path to
 write elsewhere. A backup is a normal database: `apm --db <backup> list` reads it.
 
 To move projects to another machine or database, export them and import the file:

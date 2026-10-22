@@ -291,6 +291,22 @@ fn export_to_file() {
 }
 
 #[test]
+fn export_to_file_leaves_no_partial_file() {
+    let env = Env::new();
+    run_all(&env, &[&["project", "add", "APM", "a"]]);
+    // A directory where the file should go: the rename fails, the temp file is removed.
+    let target = env.dir.path().join("out.json");
+    std::fs::create_dir(&target).unwrap();
+    let e = env.json_err(&["export", "-o", target.to_str().unwrap()]);
+    assert!(e.starts_with("cannot write "), "{e}");
+    let names: Vec<String> = std::fs::read_dir(env.dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert!(!names.iter().any(|n| n.contains(".tmp-")), "{names:?}");
+}
+
+#[test]
 fn import_under_a_new_key() {
     let src = Env::new();
     rich(&src);
@@ -317,7 +333,14 @@ fn import_under_a_new_key() {
         .assert()
         .success();
     let line = String::from_utf8(out.get_output().stdout.clone()).unwrap();
-    assert_eq!(line, "imported COPY2 from APM (4 tasks)\n");
+    assert!(
+        line.starts_with(
+            "imported COPY2 (from APM): 4 tasks, 6 statuses, 2 milestones, 6 attributes, \
+             3 comments, "
+        ),
+        "{line}"
+    );
+    assert!(line.ends_with(" events\nimported 3 links\n"), "{line}");
 
     let all = src.apm().args(["export"]).assert().success();
     let file = write(
@@ -394,9 +417,30 @@ fn dry_run_writes_nothing() {
         &String::from_utf8_lossy(&out.get_output().stdout),
     );
 
+    let exported = export(&src, &[]);
+    let events: usize = exported["projects"][0]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["events"].as_array().unwrap().len())
+        .sum();
+
     let dst = Env::new();
     let res = dst.json(&["import", &file, "--dry-run"]);
     assert_eq!(res["dry_run"], true);
+    assert_eq!(res["links"], 5);
+    let apm = &res["projects"][0];
+    assert_eq!(apm["key"], "APM");
+    for (field, n) in [
+        ("tasks", 4),
+        ("statuses", 6),
+        ("milestones", 2),
+        ("attributes", 6),
+        ("comments", 3),
+        ("events", events),
+    ] {
+        assert_eq!(apm[field], n, "{field}");
+    }
     assert_eq!(res["projects"][1]["key"], "OPS");
     assert!(project_keys(&dst).is_empty());
     let out = dst
@@ -404,10 +448,19 @@ fn dry_run_writes_nothing() {
         .args(["import", &file, "--dry-run"])
         .assert()
         .success();
+    let text = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 3, "{text}");
     assert_eq!(
-        String::from_utf8_lossy(&out.get_output().stdout),
-        "would import APM (4 tasks)\nwould import OPS (2 tasks)\n"
+        lines[0],
+        format!(
+            "would import APM: 4 tasks, 6 statuses, 2 milestones, 6 attributes, 3 comments, \
+             {events} events"
+        )
     );
+    assert!(lines[1].starts_with("would import OPS: 2 tasks, 5 statuses, 0 milestones, "));
+    assert_eq!(lines[2], "would import 5 links");
+    assert!(project_keys(&dst).is_empty());
 }
 
 #[test]
@@ -521,11 +574,11 @@ fn import_rejects_broken_files() {
         ),
         (
             &|v| v["projects"][0]["tasks"][0]["priority"] = "huge".into(),
-            "invalid priority: huge",
+            "unknown variant `huge`",
         ),
         (
             &|v| v["projects"][0]["statuses"][0]["category"] = "later".into(),
-            "invalid status category",
+            "unknown variant `later`",
         ),
         (
             &|v| v["projects"][0]["key"] = "apm".into(),
@@ -537,7 +590,49 @@ fn import_rejects_broken_files() {
         ),
         (
             &|v| v["links"][0]["kind"] = "follows".into(),
-            "invalid link kind",
+            "unknown variant `follows`",
+        ),
+        (
+            &|v| v["projects"][0]["milestones"][0]["status"] = "paused".into(),
+            "unknown variant `paused`",
+        ),
+        (
+            &|v| {
+                v["projects"][0]["tasks"] = serde_json::json!([]);
+                v["links"] = serde_json::json!([]);
+                v["projects"][0]["next_seq"] = 0.into();
+            },
+            "project APM: invalid next_seq 0",
+        ),
+        (
+            &|v| {
+                let l = v["links"][0].clone();
+                v["links"].as_array_mut().unwrap().push(l);
+            },
+            "link APM-1 blocks APM-2: appears twice",
+        ),
+        (
+            &|v| {
+                let links = v["links"].as_array_mut().unwrap();
+                links.push(serde_json::json!({"from": "APM-1", "kind": "relates", "to": "APM-2"}));
+                links.push(serde_json::json!({"from": "APM-2", "kind": "relates", "to": "APM-1"}));
+            },
+            "link APM-2 relates APM-1: appears twice",
+        ),
+        (
+            &|v| {
+                let links = v["links"].as_array_mut().unwrap();
+                links.push(serde_json::json!({"from": "APM-2", "kind": "blocks", "to": "APM-1"}));
+            },
+            "blocks cycle: APM-2 blocks APM-1 blocks APM-2",
+        ),
+        (
+            &|v| v["projects"][0]["attributes"][0]["options"] = serde_json::json!([" s", "s", "m"]),
+            "duplicate option: s",
+        ),
+        (
+            &|v| v["projects"][0]["attributes"][0]["options"] = serde_json::json!(["s", " ", "m"]),
+            "empty option",
         ),
         (
             &|v| v["projects"][0]["surprise"] = 1.into(),
@@ -571,9 +666,17 @@ fn import_normalizes_hand_written_values() {
             "name": "n", "type": "number", "options": [], "created_at": "2026-01-01T00:00:00Z"
         }));
     v["projects"][0]["tasks"][0]["values"]["n"] = "2.0".into();
+    v["projects"][0]["attributes"][0]["options"] = serde_json::json!([" s ", "m"]);
+    v["projects"][0]["tasks"][0]["values"]["size"] = " s".into();
+    v["projects"][0]["tasks"][0]["tags"] = serde_json::json!(["Perf", "perf ", "a"]);
     let dst = Env::new();
     dst.json(&["import", &write(&dst, "v.json", &v.to_string())]);
-    assert_eq!(dst.json(&["show", "APM-1"])["attributes"]["n"], 2);
+    let task = dst.json(&["show", "APM-1"]);
+    assert_eq!(task["attributes"]["n"], 2);
+    assert_eq!(task["attributes"]["size"], "s");
+    assert_eq!(task["tags"], serde_json::json!(["a", "perf"]));
+    let attrs = dst.json(&["attr", "list", "-p", "APM"]);
+    assert_eq!(attrs[0]["options"], serde_json::json!(["s", "m"]));
 }
 
 #[test]
@@ -624,7 +727,9 @@ fn backup_keep_prunes_old_backups_only() {
     run_all(&env, &[&["project", "add", "APM", "a"]]);
     let dir = env.dir.path().join("backups");
     std::fs::create_dir_all(&dir).unwrap();
+    // Hand-named files are never pruned, even when they look like backups.
     std::fs::write(dir.join("apm-0000-old.db"), "x").unwrap();
+    std::fs::write(dir.join("apm-2000-01-01T00-00-00.000Z.db"), "x").unwrap();
     std::fs::write(dir.join("mine.db"), "x").unwrap();
     let first = env.json(&["backup"])["path"].as_str().unwrap().to_string();
     let second = env.json(&["backup"])["path"].as_str().unwrap().to_string();
@@ -636,16 +741,25 @@ fn backup_keep_prunes_old_backups_only() {
         .map(|p| p.as_str().unwrap())
         .collect();
     assert_eq!(pruned.len(), 2, "{pruned:?}");
-    assert!(pruned[0].ends_with("apm-0000-old.db"));
+    assert!(pruned[0].ends_with("apm-2000-01-01T00-00-00.000Z.db"));
     assert_eq!(pruned[1], first);
     let mut left: Vec<String> = std::fs::read_dir(&dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
         .collect();
     left.sort();
-    assert_eq!(left.len(), 3);
-    assert!(left.contains(&"mine.db".to_string()));
-    assert!(second.ends_with(&left[0]));
+    assert_eq!(left.len(), 4, "{left:?}");
+    assert_eq!(left[0], "apm-0000-old.db");
+    assert!(second.ends_with(&left[1]));
+    assert_eq!(left[3], "mine.db");
+
+    // Text: the backup path first, then what was pruned.
+    let out = env.apm().args(["backup", "--keep", "1"]).assert().success();
+    let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 3, "{text}");
+    assert!(lines[0].contains("backups") && lines[0].ends_with("Z.db"));
+    assert!(lines[1].starts_with("pruned ") && lines[1].ends_with(&left[1]));
 
     // --keep is for the default dir; 0 would delete the new backup.
     env.apm()

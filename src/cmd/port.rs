@@ -5,12 +5,15 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
+use rusqlite::types::Type;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{Ctx, attr, milestone, status, tag};
-use crate::error::{Result, err};
+use super::attr::{self, AttrType};
+use super::link::{self, LinkKind};
+use super::{Ctx, milestone, status, tag};
+use crate::error::{AppError, Result, err};
 use crate::model::{self, Category, Priority, When};
 use crate::{db, input, output};
 
@@ -35,7 +38,7 @@ pub struct ImportArgs {
     /// Import a single-project file under this KEY
     #[arg(long, value_name = "NEW")]
     pub key: Option<String>,
-    /// Check the file and print what would be imported, without writing
+    /// Check the file and print what would be created, without writing
     #[arg(long)]
     pub dry_run: bool,
 }
@@ -44,7 +47,7 @@ pub struct ImportArgs {
 pub struct BackupArgs {
     /// Target file (default: backups/apm-<UTC time>.db next to the database)
     pub path: Option<PathBuf>,
-    /// Keep only the N newest apm-*.db files in the default backup dir
+    /// Keep only the N newest backups apm made in the default backup dir
     #[arg(long, value_name = "N", conflicts_with = "path",
           value_parser = clap::value_parser!(u32).range(1..))]
     pub keep: Option<u32>,
@@ -81,7 +84,7 @@ struct Project {
 #[serde(deny_unknown_fields)]
 struct Status {
     name: String,
-    category: String,
+    category: Category,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -90,9 +93,26 @@ struct Milestone {
     name: String,
     description: String,
     due: Option<String>,
-    status: String,
+    status: MilestoneStatus,
     created_at: String,
     updated_at: String,
+}
+
+/// `milestones.status`.
+#[derive(Clone, Copy, Debug, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum MilestoneStatus {
+    Open,
+    Closed,
+}
+
+impl MilestoneStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            MilestoneStatus::Open => "open",
+            MilestoneStatus::Closed => "closed",
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -100,7 +120,7 @@ struct Milestone {
 struct Attribute {
     name: String,
     #[serde(rename = "type")]
-    kind: String,
+    kind: AttrType,
     options: Vec<String>,
     created_at: String,
 }
@@ -113,7 +133,7 @@ struct Task {
     title: String,
     body: String,
     status: String,
-    priority: String,
+    priority: Priority,
     assignee: Option<String>,
     due: Option<String>,
     milestone: Option<String>,
@@ -150,7 +170,7 @@ struct Event {
 #[serde(deny_unknown_fields)]
 struct Link {
     from: String,
-    kind: String,
+    kind: LinkKind,
     to: String,
 }
 
@@ -187,9 +207,7 @@ pub fn export(ctx: &Ctx, args: ExportArgs) -> Result<()> {
     let Some(path) = args.output else {
         return output::json(&data);
     };
-    let text = serde_json::to_string_pretty(&data)? + "\n";
-    std::fs::write(&path, text)
-        .map_err(|e| err(format!("cannot write {}: {e}", path.display())))?;
+    write_whole(&path, &(serde_json::to_string_pretty(&data)? + "\n"))?;
     let keys: Vec<&str> = data.projects.iter().map(|p| p.key.as_str()).collect();
     let tasks: usize = data.projects.iter().map(|p| p.tasks.len()).sum();
     let summary = json!({
@@ -208,6 +226,31 @@ pub fn export(ctx: &Ctx, args: ExportArgs) -> Result<()> {
         path.display()
     );
     output::written(ctx.json, &summary, &line)
+}
+
+/// Write `text` to a temporary file next to `path`, then rename it over `path`: a failed
+/// write leaves no half-written file behind.
+fn write_whole(path: &Path, text: &str) -> Result<()> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| err(format!("not a file path: {}", path.display())))?;
+    let mut tmp_name = std::ffi::OsString::from(".");
+    tmp_name.push(name);
+    tmp_name.push(format!(".tmp-{}", std::process::id()));
+    let tmp = path.with_file_name(tmp_name);
+    let res = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, path));
+    if let Err(e) = res {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err(format!("cannot write {}: {e}", path.display())));
+    }
+    Ok(())
+}
+
+/// Column `i` of a row, parsed as one of apm's names for an enum (`active`, `high`, ...).
+fn named<T: ValueEnum>(r: &rusqlite::Row, i: usize) -> rusqlite::Result<T> {
+    let s: String = r.get(i)?;
+    T::from_str(&s, false)
+        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(i, Type::Text, e.into()))
 }
 
 fn export_project(conn: &Connection, id: i64) -> Result<Project> {
@@ -233,7 +276,7 @@ fn export_project(conn: &Connection, id: i64) -> Result<Project> {
         |r| {
             Ok(Status {
                 name: r.get(0)?,
-                category: r.get(1)?,
+                category: named(r, 1)?,
             })
         },
     )?;
@@ -247,7 +290,7 @@ fn export_project(conn: &Connection, id: i64) -> Result<Project> {
                 name: r.get(0)?,
                 description: r.get(1)?,
                 due: r.get(2)?,
-                status: r.get(3)?,
+                status: named(r, 3)?,
                 created_at: r.get(4)?,
                 updated_at: r.get(5)?,
             })
@@ -257,7 +300,7 @@ fn export_project(conn: &Connection, id: i64) -> Result<Project> {
         conn,
         "SELECT name, type, options, created_at FROM attributes WHERE project_id = ?1 ORDER BY id",
         id,
-        |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, String>(2)?, r.get(3)?)),
+        |r| Ok((r.get(0)?, named(r, 1)?, r.get::<_, String>(2)?, r.get(3)?)),
     )?
     .into_iter()
     .map(|(name, kind, options, created_at)| {
@@ -290,7 +333,7 @@ fn export_project(conn: &Connection, id: i64) -> Result<Project> {
                     title: r.get(3)?,
                     body: r.get(4)?,
                     status: r.get(5)?,
-                    priority: r.get(6)?,
+                    priority: named(r, 6)?,
                     assignee: r.get(7)?,
                     due: r.get(8)?,
                     milestone: r.get(9)?,
@@ -369,7 +412,7 @@ fn export_links(conn: &Connection, project_ids: &[i64]) -> Result<Vec<Link>> {
             Ok((
                 Link {
                     from: r.get(0)?,
-                    kind: r.get(1)?,
+                    kind: named(r, 1)?,
                     to: r.get(2)?,
                 },
                 r.get::<_, i64>(3)?,
@@ -404,7 +447,7 @@ pub fn import(ctx: &Ctx, args: ImportArgs) -> Result<()> {
         file => input::read_text(None, Some(Path::new(file)), &input::IMPORT)?,
     }
     .unwrap_or_default();
-    let data = parse(&text)?;
+    let mut data = parse(&text)?;
     let new_key = match args.key.as_deref() {
         Some(key) if data.projects.len() != 1 => {
             return Err(err(format!(
@@ -415,7 +458,7 @@ pub fn import(ctx: &Ctx, args: ImportArgs) -> Result<()> {
         Some(key) => Some(db::check_project_key(key)?),
         None => None,
     };
-    check(&data)?;
+    check(&mut data)?;
     // Everything in one write transaction: a failure (or --dry-run) leaves the database as it was.
     let tx = db::write_tx(&ctx.conn)?;
     let mut ids = HashMap::new();
@@ -427,7 +470,7 @@ pub fn import(ctx: &Ctx, args: ImportArgs) -> Result<()> {
     }
     let mut stmt = tx.prepare("INSERT INTO links (from_id, to_id, kind) VALUES (?1, ?2, ?3)")?;
     for link in &data.links {
-        stmt.execute(params![ids[&link.from], ids[&link.to], link.kind])?;
+        stmt.execute(params![ids[&link.from], ids[&link.to], link.kind.as_str()])?;
     }
     drop(stmt);
     if args.dry_run {
@@ -443,17 +486,31 @@ pub fn import(ctx: &Ctx, args: ImportArgs) -> Result<()> {
     };
     let mut lines = Vec::new();
     let mut projects = Vec::new();
-    for (project, key, claimed) in done {
+    for (p, key, claimed) in done {
+        let comments: usize = p.tasks.iter().map(|t| t.comments.len()).sum();
+        let events: usize = p.tasks.iter().map(|t| t.events.len()).sum();
         let mut line = format!("{verb} {key}");
-        if *key != project.key {
-            line.push_str(&format!(" from {}", project.key));
+        if *key != p.key {
+            line.push_str(&format!(" (from {})", p.key));
         }
-        line.push_str(&format!(" ({} tasks)", project.tasks.len()));
+        line.push_str(&format!(
+            ": {} tasks, {} statuses, {} milestones, {} attributes, {comments} comments, \
+             {events} events",
+            p.tasks.len(),
+            p.statuses.len(),
+            p.milestones.len(),
+            p.attributes.len(),
+        ));
         let mut value = json!({
             "key": key,
-            "source_key": project.key,
-            "name": project.name,
-            "tasks": project.tasks.len(),
+            "source_key": p.key,
+            "name": p.name,
+            "tasks": p.tasks.len(),
+            "statuses": p.statuses.len(),
+            "milestones": p.milestones.len(),
+            "attributes": p.attributes.len(),
+            "comments": comments,
+            "events": events,
         });
         if let Some(from) = claimed {
             line.push_str(&format!(
@@ -464,14 +521,12 @@ pub fn import(ctx: &Ctx, args: ImportArgs) -> Result<()> {
         lines.push(line);
         projects.push(value);
     }
+    lines.push(format!("{verb} {} links", data.links.len()));
     let summary = json!({
         "dry_run": args.dry_run,
         "projects": projects,
         "links": data.links.len(),
     });
-    if lines.is_empty() {
-        lines.push(format!("{verb} nothing"));
-    }
     output::written(ctx.json, &summary, &lines.join("\n"))
 }
 
@@ -491,24 +546,28 @@ fn parse(text: &str) -> Result<Export> {
     }
 }
 
-/// Validate the file before anything is written: names and values as the commands that
-/// create them check them, and every reference (parent, status, milestone, attribute, link
-/// end) points at something in the file. Database conflicts (an existing key) are found by
-/// the write itself, inside the transaction.
-fn check(data: &Export) -> Result<()> {
+/// Validate the file before anything is written, with the rules of the commands that create
+/// the same things, and put values, tags and select options in their stored form. Every
+/// reference (parent, status, milestone, attribute, link end) must point into the file.
+/// Database conflicts (an existing key) are found by the write itself, inside the transaction.
+fn check(data: &mut Export) -> Result<()> {
     let mut keys = HashSet::new();
     // Every task in the file, as KEY-N (the file's keys).
     let mut all_tasks = HashSet::new();
-    for p in &data.projects {
-        let at = |e: crate::error::AppError| err(format!("project {}: {e}", p.key));
+    for p in &mut data.projects {
+        let pkey = p.key.clone();
+        let at = |e: AppError| err(format!("project {pkey}: {e}"));
         if db::check_project_key(&p.key)? != p.key {
             return Err(err(format!("project key must be uppercase: {}", p.key)));
         }
-        if !keys.insert(p.key.as_str()) {
+        if !keys.insert(p.key.clone()) {
             return Err(err(format!("project {} appears twice", p.key)));
         }
         if p.name.trim().is_empty() {
             return Err(at(err("project name cannot be empty")));
+        }
+        if p.next_seq < 1 {
+            return Err(at(err(format!("invalid next_seq {}", p.next_seq))));
         }
         check_time(&p.created_at).map_err(at)?;
         check_time(&p.updated_at).map_err(at)?;
@@ -521,8 +580,6 @@ fn check(data: &Export) -> Result<()> {
             if status::clean_name(&s.name).map_err(at)? != s.name {
                 return Err(at(err(format!("invalid status name: `{}`", s.name))));
             }
-            Category::from_str(&s.category, false)
-                .map_err(|_| at(err(format!("invalid status category: {}", s.category))))?;
             if !statuses.insert(s.name.to_ascii_lowercase()) {
                 return Err(at(err(format!("status appears twice: {}", s.name))));
             }
@@ -532,29 +589,32 @@ fn check(data: &Export) -> Result<()> {
             if milestone::clean_name(&m.name).map_err(at)? != m.name {
                 return Err(at(err(format!("invalid milestone name: `{}`", m.name))));
             }
-            if !milestones.insert(m.name.as_str()) {
+            if !milestones.insert(m.name.clone()) {
                 return Err(at(err(format!("milestone appears twice: {}", m.name))));
             }
             if let Some(due) = &m.due {
                 check_due(due).map_err(at)?;
             }
-            if m.status != "open" && m.status != "closed" {
-                return Err(at(err(format!("invalid milestone status: {}", m.status))));
-            }
             check_time(&m.created_at).map_err(at)?;
             check_time(&m.updated_at).map_err(at)?;
         }
         let mut attrs = HashMap::new();
-        for a in &p.attributes {
-            attr::check_decl(&a.name, &a.kind, &a.options).map_err(at)?;
-            if attrs.insert(a.name.as_str(), a).is_some() {
+        for a in &mut p.attributes {
+            if attr::check_name(&a.name).map_err(at)? != a.name {
+                return Err(at(err(format!("invalid attribute name: `{}`", a.name))));
+            }
+            a.options = attr::clean_options(a.kind, &a.options).map_err(at)?;
+            check_time(&a.created_at).map_err(at)?;
+            if attrs
+                .insert(a.name.clone(), (a.kind, a.options.clone()))
+                .is_some()
+            {
                 return Err(at(err(format!("attribute appears twice: {}", a.name))));
             }
-            check_time(&a.created_at).map_err(at)?;
         }
 
         // Task numbers first, so a parent may come after its subtask.
-        let mut seqs = HashMap::new();
+        let mut parents = HashMap::new();
         for t in &p.tasks {
             let seq = task_seq(&p.key, &t.id).map_err(at)?;
             if seq >= p.next_seq {
@@ -563,16 +623,17 @@ fn check(data: &Export) -> Result<()> {
                     t.id, p.next_seq
                 ))));
             }
-            if seqs.insert(seq, t.parent.as_deref()).is_some() {
+            if parents.insert(seq, t.parent.clone()).is_some() {
                 return Err(at(err(format!("task appears twice: {}", t.id))));
             }
-            all_tasks.insert(t.id.as_str());
+            all_tasks.insert(t.id.clone());
         }
-        for t in &p.tasks {
-            let at = |e: crate::error::AppError| err(format!("{}: {e}", t.id));
+        for t in &mut p.tasks {
+            let id = t.id.clone();
+            let at = |e: AppError| err(format!("{id}: {e}"));
             if let Some(parent) = &t.parent {
                 let seq = task_seq(&p.key, parent).map_err(at)?;
-                if !seqs.contains_key(&seq) {
+                if !parents.contains_key(&seq) {
                     return Err(at(err(format!("no such parent in the file: {parent}"))));
                 }
             }
@@ -582,25 +643,29 @@ fn check(data: &Export) -> Result<()> {
             if !statuses.contains(&t.status.to_ascii_lowercase()) {
                 return Err(at(err(format!("no such status: {}", t.status))));
             }
-            Priority::from_str(&t.priority, false)
-                .map_err(|_| at(err(format!("invalid priority: {}", t.priority))))?;
             if let Some(due) = &t.due {
                 check_due(due).map_err(at)?;
             }
             if let Some(m) = &t.milestone
-                && !milestones.contains(m.as_str())
+                && !milestones.contains(m)
             {
                 return Err(at(err(format!("no such milestone: {m}"))));
             }
-            for (name, value) in &t.values {
-                let a = attrs
-                    .get(name.as_str())
+            for (name, value) in &mut t.values {
+                let (kind, options) = attrs
+                    .get(name)
                     .ok_or_else(|| at(err(format!("unknown attribute: {name}"))))?;
-                attr::normalize_value(name, &a.kind, &a.options, value).map_err(at)?;
+                *value = attr::normalize_value(*kind, options, value.as_str())
+                    .map_err(|why| at(err(format!("invalid value for {name}: {why}"))))?;
             }
-            for tag in &t.tags {
-                tag::normalize(tag).map_err(at)?;
-            }
+            t.tags = t
+                .tags
+                .iter()
+                .map(|s| tag::normalize(s))
+                .collect::<Result<_>>()
+                .map_err(at)?;
+            t.tags.sort();
+            t.tags.dedup();
             check_time(&t.created_at).map_err(at)?;
             check_time(&t.updated_at).map_err(at)?;
             for c in &t.comments {
@@ -615,27 +680,46 @@ fn check(data: &Export) -> Result<()> {
         }
         // A parent chain must end: walk up at most as many steps as there are tasks.
         for t in &p.tasks {
-            let mut parent = t.parent.as_deref();
+            let mut parent = t.parent.clone();
             for _ in 0..=p.tasks.len() {
                 let Some(id) = parent else { break };
-                parent = seqs[&task_seq(&p.key, id)?];
+                parent = parents[&task_seq(&p.key, &id)?].clone();
             }
             if parent.is_some() {
                 return Err(at(err(format!("parent cycle at {}", t.id))));
             }
         }
     }
+
+    // Links, as `link` checks them, each against the ones before it.
+    let mut seen = HashSet::new();
+    let mut blocks: HashMap<&str, Vec<&str>> = HashMap::new();
     for l in &data.links {
-        let name = format!("link {} {} {}", l.from, l.kind, l.to);
+        let name = format!("link {} {} {}", l.from, l.kind.as_str(), l.to);
         for end in [&l.from, &l.to] {
-            if !all_tasks.contains(end.as_str()) {
+            if !all_tasks.contains(end) {
                 return Err(err(format!("{name}: no such task in the file: {end}")));
             }
         }
-        super::link::LinkKind::from_str(&l.kind, false)
-            .map_err(|_| err(format!("{name}: invalid link kind")))?;
         if l.from == l.to {
             return Err(err(format!("{name}: a task cannot link to itself")));
+        }
+        // `relates` is symmetric: A relates B and B relates A are the same link.
+        let (a, b) = match l.kind {
+            LinkKind::Relates if l.to < l.from => (&l.to, &l.from),
+            _ => (&l.from, &l.to),
+        };
+        if !seen.insert((a, l.kind.as_str(), b)) {
+            return Err(err(format!("{name}: appears twice")));
+        }
+        if l.kind == LinkKind::Blocks {
+            let cycle = link::blocks_cycle(l.from.as_str(), l.to.as_str(), |id| {
+                Ok(blocks.get(id).cloned().unwrap_or_default())
+            })?;
+            if let Some(path) = cycle {
+                return Err(err(format!("blocks cycle: {}", path.join(" blocks "))));
+            }
+            blocks.entry(&l.from).or_default().push(&l.to);
         }
     }
     Ok(())
@@ -697,7 +781,7 @@ fn import_project(
     for (i, s) in p.statuses.iter().enumerate() {
         tx.execute(
             "INSERT INTO statuses (project_id, name, category, position) VALUES (?1, ?2, ?3, ?4)",
-            params![project_id, s.name, s.category, i as i64 + 1],
+            params![project_id, s.name, s.category.as_str(), i as i64 + 1],
         )?;
         statuses.insert(s.name.to_ascii_lowercase(), tx.last_insert_rowid());
     }
@@ -712,7 +796,7 @@ fn import_project(
                 m.name,
                 m.description,
                 m.due,
-                m.status,
+                m.status.as_str(),
                 m.created_at,
                 m.updated_at
             ],
@@ -727,14 +811,15 @@ fn import_project(
             params![
                 project_id,
                 a.name,
-                a.kind,
+                a.kind.as_str(),
                 serde_json::to_string(&a.options)?,
                 a.created_at
             ],
         )?;
-        attrs.insert(a.name.as_str(), (tx.last_insert_rowid(), a));
+        attrs.insert(a.name.as_str(), tx.last_insert_rowid());
     }
 
+    // check() put values and tags in their stored form.
     let mut seq_ids = HashMap::new();
     for t in &p.tasks {
         let seq = task_seq(&p.key, &t.id)?;
@@ -750,7 +835,7 @@ fn import_project(
                 t.title,
                 t.body,
                 statuses[&t.status.to_ascii_lowercase()],
-                t.priority,
+                t.priority.as_str(),
                 t.assignee,
                 t.due,
                 t.created_by,
@@ -762,17 +847,15 @@ fn import_project(
         seq_ids.insert(seq, item_id);
         ids.insert(t.id.clone(), item_id);
         for (name, value) in &t.values {
-            let (attribute_id, a) = attrs[name.as_str()];
-            let value = attr::normalize_value(name, &a.kind, &a.options, value)?;
             tx.execute(
                 "INSERT INTO item_values (item_id, attribute_id, value) VALUES (?1, ?2, ?3)",
-                params![item_id, attribute_id, value],
+                params![item_id, attrs[name.as_str()], value],
             )?;
         }
         for tag in &t.tags {
             tx.execute(
-                "INSERT OR IGNORE INTO tags (item_id, tag) VALUES (?1, ?2)",
-                params![item_id, tag::normalize(tag)?],
+                "INSERT INTO tags (item_id, tag) VALUES (?1, ?2)",
+                params![item_id, tag],
             )?;
         }
         for c in &t.comments {
@@ -815,7 +898,8 @@ pub fn backup(ctx: &Ctx, db_path: &Path, args: BackupArgs) -> Result<()> {
     let target = match args.path {
         Some(path) => path,
         None => {
-            std::fs::create_dir_all(&dir)?;
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| err(format!("cannot create backup dir: {}: {e}", dir.display())))?;
             // Milliseconds, so two backups in one second do not collide; sorts by time.
             let stamp: String =
                 ctx.conn
@@ -833,38 +917,67 @@ pub fn backup(ctx: &Ctx, db_path: &Path, args: BackupArgs) -> Result<()> {
         .ok_or_else(|| err(format!("path is not UTF-8: {}", target.display())))?;
     // A consistent copy, even of a database other agents are writing (WAL included).
     ctx.conn.execute("VACUUM INTO ?1", params![target_text])?;
-    let pruned = match args.keep {
-        Some(keep) => prune(&dir, keep as usize)?,
-        None => Vec::new(),
-    };
     let path = target.display().to_string();
-    let pruned: Vec<String> = pruned.iter().map(|p| p.display().to_string()).collect();
-    let mut line = path.clone();
-    for p in &pruned {
-        line.push_str(&format!("\npruned {p}"));
+    if !ctx.json {
+        println!("{path}");
     }
-    output::written(ctx.json, &json!({ "path": path, "pruned": pruned }), &line)
+    // The backup exists now: a failure to prune is a warning, not an error.
+    let mut pruned = Vec::new();
+    let mut warning = None;
+    if let Some(keep) = args.keep {
+        warning = prune(&dir, keep as usize, &mut pruned).err();
+    }
+    let pruned: Vec<String> = pruned.iter().map(|p| p.display().to_string()).collect();
+    if ctx.json {
+        output::json(&json!({ "path": path, "pruned": pruned }))?;
+    } else {
+        for p in &pruned {
+            println!("pruned {p}");
+        }
+    }
+    if let Some(e) = warning {
+        output::print_warning(&e.0, ctx.json);
+    }
+    Ok(())
 }
 
-/// Delete all but the `keep` newest `apm-*.db` files in `dir` (names sort by time).
-fn prune(dir: &Path, keep: usize) -> Result<Vec<PathBuf>> {
-    let mut backups: Vec<PathBuf> = std::fs::read_dir(dir)?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("apm-") && n.ends_with(".db"))
-        })
-        .collect();
+/// Delete all but the `keep` newest backups `backup` made in `dir` (names sort by time),
+/// adding each deleted file to `pruned`. Other files are left alone.
+fn prune(dir: &Path, keep: usize, pruned: &mut Vec<PathBuf>) -> Result<()> {
+    let cannot = |what: &str, path: &Path, e: std::io::Error| {
+        err(format!("cannot {what}: {}: {e}", path.display()))
+    };
+    let mut backups = Vec::new();
+    for entry in std::fs::read_dir(dir).map_err(|e| cannot("read backup dir", dir, e))? {
+        let path = entry.map_err(|e| cannot("read backup dir", dir, e))?.path();
+        let ours = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(is_backup_name);
+        if ours && path.is_file() {
+            backups.push(path);
+        }
+    }
     backups.sort();
     let old = backups.len().saturating_sub(keep);
-    let pruned: Vec<PathBuf> = backups.drain(..old).collect();
-    for p in &pruned {
-        std::fs::remove_file(p)?;
+    for path in backups.drain(..old) {
+        std::fs::remove_file(&path).map_err(|e| cannot("prune backup", &path, e))?;
+        pruned.push(path);
     }
-    Ok(pruned)
+    Ok(())
+}
+
+/// A name `backup` generates: `apm-YYYY-MM-DDTHH-MM-SS.mmmZ.db`.
+fn is_backup_name(name: &str) -> bool {
+    const SHAPE: &[u8] = b"apm-0000-00-00T00-00-00.000Z.db";
+    name.len() == SHAPE.len()
+        && name.bytes().zip(SHAPE).all(|(c, &s)| {
+            if s == b'0' {
+                c.is_ascii_digit()
+            } else {
+                c == s
+            }
+        })
 }
 
 #[cfg(test)]
@@ -886,5 +999,14 @@ mod tests {
         assert!(check_time("2026-10-22").is_err());
         assert!(check_due("2026-10-22").is_ok());
         assert!(check_due("2026-10-22T16:12:00+02:00").is_err());
+    }
+
+    #[test]
+    fn backup_names() {
+        assert!(is_backup_name("apm-2026-10-22T14-12-00.123Z.db"));
+        assert!(!is_backup_name("apm-old.db"));
+        assert!(!is_backup_name("apm-2026-10-22T14-12-00.123Z.db-wal"));
+        assert!(!is_backup_name("apm-2026-10-22T14-12-00Z.db"));
+        assert!(!is_backup_name("apm-2026-1x-22T14-12-00.123Z.db"));
     }
 }
