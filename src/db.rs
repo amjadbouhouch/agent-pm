@@ -148,19 +148,36 @@ pub struct ItemRef {
     pub project_id: i64,
 }
 
-/// Split `APM-12` into (`APM`, 12). The key may itself contain hyphens; the number is after the last one.
+/// Validate a project key (1-10 ASCII letters/digits, starting with a letter); returns it uppercased.
+pub fn check_project_key(key: &str) -> Result<String> {
+    let ok = (1..=10).contains(&key.len())
+        && key.starts_with(|c: char| c.is_ascii_alphabetic())
+        && key.chars().all(|c| c.is_ascii_alphanumeric());
+    if !ok {
+        return Err(err(format!(
+            "invalid project key `{key}`: 1-10 letters/digits, starting with a letter"
+        )));
+    }
+    Ok(key.to_uppercase())
+}
+
+/// Split `APM-12` into (`APM`, 12).
 pub fn parse_item_key(s: &str) -> Result<(String, i64)> {
     let bad = || {
         err(format!(
             "invalid item reference `{s}`, expected KEY-N like APM-12"
         ))
     };
-    let (key, n) = s.rsplit_once('-').ok_or_else(bad)?;
-    let n: i64 = n.parse().map_err(|_| bad())?;
-    if key.is_empty() || n < 1 {
+    let (key, n) = s.split_once('-').ok_or_else(bad)?;
+    let key = check_project_key(key).map_err(|_| bad())?;
+    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
         return Err(bad());
     }
-    Ok((key.to_uppercase(), n))
+    let n: i64 = n.parse().map_err(|_| bad())?;
+    if n < 1 {
+        return Err(bad());
+    }
+    Ok((key, n))
 }
 
 /// Resolve `KEY-N` to an item.
@@ -185,12 +202,19 @@ mod tests {
     #[test]
     fn item_keys() {
         assert_eq!(parse_item_key("apm-12").unwrap(), ("APM".to_string(), 12));
-        assert_eq!(
-            parse_item_key("MY-APP-3").unwrap(),
-            ("MY-APP".to_string(), 3)
-        );
+        assert!(parse_item_key("MY-APP-3").is_err());
+        assert!(parse_item_key("APM-+3").is_err());
         assert!(parse_item_key("APM").is_err());
         assert!(parse_item_key("APM-0").is_err());
         assert!(parse_item_key("-3").is_err());
+    }
+
+    #[test]
+    fn project_keys() {
+        assert_eq!(check_project_key("apm2").unwrap(), "APM2");
+        assert!(check_project_key("").is_err());
+        assert!(check_project_key("2APM").is_err());
+        assert!(check_project_key("A-B").is_err());
+        assert!(check_project_key("ABCDEFGHIJK").is_err());
     }
 }

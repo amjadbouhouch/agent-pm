@@ -61,10 +61,10 @@ pub enum Command {
 
 /// `--as` > `$APM_AGENT` > `$USER` / `$USERNAME` > "unknown".
 pub fn actor(flag: Option<&str>) -> String {
-    flag.map(str::to_string)
-        .or_else(|| std::env::var("APM_AGENT").ok())
-        .or_else(|| std::env::var("USER").ok())
-        .or_else(|| std::env::var("USERNAME").ok())
-        .filter(|s| !s.trim().is_empty())
+    let given = |v: Option<String>| v.filter(|s| !s.trim().is_empty());
+    given(flag.map(str::to_string))
+        .or_else(|| given(std::env::var("APM_AGENT").ok()))
+        .or_else(|| given(std::env::var("USER").ok()))
+        .or_else(|| given(std::env::var("USERNAME").ok()))
         .unwrap_or_else(|| "unknown".to_string())
 }

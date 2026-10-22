@@ -28,10 +28,17 @@ fn db_flag_overrides_env() {
 }
 
 #[test]
-fn errors_are_json_on_stderr() {
+fn usage_errors_are_json_under_json_flag() {
     let env = Env::new();
-    let msg = env.json_err(&["comment", "nope", "hi"]);
-    assert!(!msg.is_empty());
+    let out = env.apm().args(["--json", "add"]).assert().code(2);
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stderr).unwrap();
+    assert!(v["error"].as_str().unwrap().contains("required"));
+}
+
+#[test]
+fn usage_errors_are_text_without_json_flag() {
+    let env = Env::new();
+    env.apm().arg("add").assert().code(2);
 }
 
 #[test]

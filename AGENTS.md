@@ -9,7 +9,8 @@ milestones, tasks, subtasks, assignees and custom attributes. A mini Notion for 
   `target/release/apm(.exe)` after changes that add code or crates; report it if it grows by
   more than ~10%. No new crate without the orchestrator's (or owner's) OK.
 - **Agents are the main user.** Every command accepts `--json` and prints stable JSON on stdout;
-  errors go to stderr (`error: <msg>`, or `{"error": "<msg>"}` with `--json`) with exit code 1.
+  errors go to stderr (`error: <msg>`, or `{"error": "<msg>"}` with `--json`) with exit code 1;
+  invalid arguments exit 2 (clap's usage text, or the same JSON shape under `--json`).
   Text output stays short and grep-friendly. Never prompt: no interactive confirmations.
 - **Simple over clever.** Plain SQL with `rusqlite`, no ORM, no async, no global state.
 
@@ -45,8 +46,8 @@ tests/             integration tests (run the real binary on a temp DB)
 
 - Errors: return `crate::error::Result`; build with `err("...")`. Messages are lowercase and
   name the thing (`no such project: APM`).
-- Ids: projects have an uppercase KEY; tasks are `KEY-N` (per-project sequence, never reused).
-  Keys are case-insensitive on input.
+- Ids: projects have an uppercase KEY (1-10 letters/digits, `db::check_project_key`); tasks are
+  `KEY-N` (per-project sequence, never reused, `db::parse_item_key`). Case-insensitive on input.
 - Database: `--db` > `$APM_DB` > `~/.agent-pm/apm.db`. Schema changes are a **new** entry
   appended to `MIGRATIONS` in `db.rs`; never edit a released one. Foreign keys are on.
   Timestamps are UTC ISO text written by SQLite defaults; set `updated_at` on every update.
