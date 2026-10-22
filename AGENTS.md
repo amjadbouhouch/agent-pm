@@ -48,6 +48,7 @@ src/output.rs      JSON printing, errors, text tables
 src/input.rs       long text from stdin or a file (bodies, comments): UTF-8, BOM, no tty
 tests/             integration tests (run the real binary on a temp DB)
 install.sh         installer for release binaries (POSIX sh)
+install.ps1        Windows installer (PowerShell 5.1+)
 scripts/           version-updater.cjs for commit-and-tag-version
 ```
 
@@ -122,3 +123,14 @@ existing tag. `ci.yml` covers pull requests and manual runs only, on Linux, macO
 binary: `~/.agent-pm` also holds the database. `tests/release_assets.rs` runs it against a
 stubbed `uname` for all four platforms and asserts every asset it requests is in
 `release.yml`, and that Cargo.toml, Cargo.lock and `apm --version` agree.
+
+`install.ps1` is the Windows twin (PowerShell 5.1 and 7): same flags as PowerShell parameters
+(`-Version`, `-Dir`, `-NoModifyPath`, `-Uninstall`, ...) and the same `APM_*` environment
+variables, which are the only way to configure it under `irm | iex` (no parameters there,
+and it never calls `exit`, which would close the user's shell). It edits the user PATH in
+the registry (`HKCU\Environment`, kept unexpanded), asks only in an interactive console,
+and moves a running `apm.exe` aside instead of failing. Keep it ASCII (5.1 reads BOM-less
+scripts as ANSI). `tests/install_ps1.rs` (Windows only) runs it for real against a local
+mirror holding the test binary; `APM_PATH_REG_KEY` points its PATH edits at a throwaway
+HKCU key and `USERPROFILE` at a temp home, so tests never touch the real PATH or
+`~/.agent-pm`. `ci.yml`'s Windows leg also parses it with both PowerShells.

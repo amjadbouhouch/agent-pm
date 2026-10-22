@@ -37,9 +37,23 @@ This puts `apm` in `~/.agent-pm/bin` and offers to add it to your `PATH`. Re-run
 upgrade. Options: `--version v0.1.0`, `--dir DIR`, `--no-modify-path`, `--uninstall`
 (keeps your database); `sh install.sh --help` lists them all.
 
-Windows: download `apm-windows-x64.exe` from the
-[latest release](https://github.com/amjadbouhouch/agent-pm/releases/latest), rename it to
-`apm.exe` and put it on your `PATH`.
+Windows (x64; PowerShell 5.1 or 7):
+
+```powershell
+irm https://raw.githubusercontent.com/amjadbouhouch/agent-pm/main/install.ps1 | iex
+```
+
+This puts `apm.exe` in `%USERPROFILE%\.agent-pm\bin` and offers to add it to your user
+`PATH` (no admin). Re-run it to upgrade. `irm | iex` takes no parameters, so set
+`$env:APM_VERSION = "v0.3.0"` (or `APM_INSTALL_DIR`, `APM_MODIFY_PATH = "no"`) first, or
+download the script and run it:
+
+```powershell
+irm https://raw.githubusercontent.com/amjadbouhouch/agent-pm/main/install.ps1 -OutFile install.ps1
+.\install.ps1 -Version v0.3.0   # also -Dir DIR, -NoModifyPath, -Uninstall (keeps your database), -Help
+```
+
+If scripts are blocked, run it as `powershell -ExecutionPolicy Bypass -File .\install.ps1`.
 
 Or build it with Rust (also the way on musl/Alpine):
 
