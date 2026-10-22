@@ -77,10 +77,10 @@ pub struct ListArgs {
     /// Only tasks with this tag (repeatable, all must match)
     #[arg(long = "tag", value_name = "TAG")]
     pub tags: Vec<String>,
-    /// Only open tasks with no open blocker
+    /// Only open tasks with no open blocker, not in a status named blocked
     #[arg(long, conflicts_with = "blocked")]
     pub ready: bool,
-    /// Only open tasks with at least one open blocker
+    /// Only open tasks with an open blocker or in a status named blocked
     #[arg(long)]
     pub blocked: bool,
 }
@@ -604,7 +604,8 @@ pub fn query(conn: &Connection, cond: &str, vals: &[SqlValue]) -> Result<Vec<Ite
 }
 
 /// `list --tag`, `--ready`, `--blocked` as conditions over `items i` / `statuses s`.
-/// Ready and blocked tasks are open ones, whatever `--all` says.
+/// Ready and blocked tasks are open ones, whatever `--all` says. A task is blocked when an
+/// open task blocks it or its status is named `blocked` (the `block` shortcut's status).
 fn list_links_and_tags(
     args: &ListArgs,
     conds: &mut Vec<String>,
@@ -615,9 +616,19 @@ fn list_links_and_tags(
         conds.push(tag::has_tag(&mark));
     }
     if args.ready || args.blocked {
-        conds.push("s.category NOT IN ('done', 'cancelled')".to_string());
+        let closed: Vec<String> = Category::value_variants()
+            .iter()
+            .filter(|c| c.is_closed())
+            .map(|c| bind(vals, c.as_str().to_string()))
+            .collect();
+        let closed = closed.join(", ");
+        conds.push(format!("s.category NOT IN ({closed})"));
+        let named = bind(vals, "blocked".to_string());
         let not = if args.ready { "NOT " } else { "" };
-        conds.push(format!("{not}{}", link::HAS_OPEN_BLOCKER));
+        conds.push(format!(
+            "{not}(s.name = {named} COLLATE NOCASE OR {})",
+            link::has_open_blocker(&closed)
+        ));
     }
     Ok(())
 }

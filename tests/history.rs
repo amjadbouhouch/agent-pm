@@ -313,6 +313,7 @@ fn history_text_lines() {
         "2026-12-01",
     ]);
     env.json(&["--as", "bob", "edit", "APM-1", "--tag", "ui"]);
+    env.json(&["--as", "bob", "comment", "APM-1", "line one\nline two"]);
     let out = env.apm().args(["history", "APM-1"]).assert().success();
     let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     // Drop the timestamp column.
@@ -324,7 +325,13 @@ fn history_text_lines() {
             "bob changed status: todo → doing",
             "bob changed due: - → 2026-12-01",
             "bob tagged ui",
+            // One line per event: line breaks print as \n (JSON keeps the real text).
+            r"bob commented line one\nline two",
         ]
+    );
+    assert_eq!(
+        env.json(&["history", "APM-1"])[4]["new"],
+        "line one\nline two"
     );
 }
 

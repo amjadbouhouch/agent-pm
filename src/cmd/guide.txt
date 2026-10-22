@@ -49,8 +49,7 @@ STATUSES
 
 LINKS, TAGS, HISTORY
   apm link APM-1 blocks APM-3                        # kinds: blocks relates duplicates
-  apm list -p APM --ready                            # open, no open blocker (or --blocked)
-  apm edit APM-3 --tag perf --untag wip              # tags: lowercase a-z 0-9 _ : . -
+  apm list -p APM --ready                            # open, no open blocker (or --blocked)  apm edit APM-3 --tag perf --untag wip              # tags: lowercase a-z 0-9 _ : . -
   apm list --tag perf                                # repeatable: all must match
   apm tags -p APM                                    # tags by count
   apm history APM-3 --limit 5                        # latest 5 events, oldest first
@@ -63,6 +62,7 @@ VALUES
   Priority: none (default) | low | medium | high | urgent
   Dates:    YYYY-MM-DD. Checkbox: true/false/yes/no/1/0.
   `list` hides done/cancelled-category tasks unless --all or --status.
+  Blocked: open, with an open blocker or in a status named blocked; else --ready.
 
 COMMANDS
   project add|list|show|edit|rm   manage projects (rm deletes everything in it)

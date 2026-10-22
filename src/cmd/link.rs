@@ -1,5 +1,6 @@
 //! Links between tasks: `A blocks B`, `A relates B`, `A duplicates B`. Cross-project allowed.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 
 use clap::{Args, ValueEnum};
@@ -96,6 +97,7 @@ pub fn link(ctx: &Ctx, args: LinkArgs) -> Result<()> {
         kind: args.kind.as_str(),
         to: to_key.clone(),
     };
+    // The write transaction holds the lock, so no other agent can add the link in between.
     if find(&tx, from, args.kind, to)?.is_some() {
         return Err(err(format!(
             "link already exists: {from_key} {} {to_key}",
@@ -105,20 +107,14 @@ pub fn link(ctx: &Ctx, args: LinkArgs) -> Result<()> {
     if args.kind == LinkKind::Blocks {
         check_cycle(&tx, from, to)?;
     }
-    let res = tx.execute(
+    tx.execute(
         "INSERT INTO links (from_id, to_id, kind) VALUES (?1, ?2, ?3)",
         params![from, to, args.kind.as_str()],
-    );
-    db::unique(res, || {
-        err(format!(
-            "link already exists: {from_key} {} {to_key}",
-            shown.kind
-        ))
-    })?;
+    )?;
     record(
         &tx,
         &ctx.actor,
-        EventKind::Linked,
+        true,
         args.kind,
         (from, &from_key),
         (to, &to_key),
@@ -143,11 +139,10 @@ pub fn unlink(ctx: &Ctx, args: LinkArgs) -> Result<()> {
         "DELETE FROM links WHERE from_id = ?1 AND to_id = ?2 AND kind = ?3",
         params![stored_from, stored_to, kind],
     )?;
-    let action = EventKind::Unlinked;
     record(
         &tx,
         &ctx.actor,
-        action,
+        false,
         args.kind,
         (from, &from_key),
         (to, &to_key),
@@ -204,12 +199,17 @@ fn group(
 }
 
 /// SQL condition over `items i`: the task has at least one open task blocking it.
-pub const HAS_OPEN_BLOCKER: &str = "EXISTS (
-    SELECT 1 FROM links bl
-    JOIN items bi ON bi.id = bl.from_id
-    JOIN statuses bs ON bs.id = bi.status_id
-    WHERE bl.to_id = i.id AND bl.kind = 'blocks'
-      AND bs.category NOT IN ('done', 'cancelled'))";
+/// `closed` is the placeholder list of the closed categories, e.g. `?3, ?4`.
+pub fn has_open_blocker(closed: &str) -> String {
+    format!(
+        "EXISTS (
+            SELECT 1 FROM links bl
+            JOIN items bi ON bi.id = bl.from_id
+            JOIN statuses bs ON bs.id = bi.status_id
+            WHERE bl.to_id = i.id AND bl.kind = 'blocks'
+              AND bs.category NOT IN ({closed}))"
+    )
+}
 
 /// Resolve both ends and refuse a self-link.
 fn ends(conn: &Connection, args: &LinkArgs) -> Result<(i64, i64)> {
@@ -253,9 +253,11 @@ fn check_cycle(conn: &Connection, from: i64, to: i64) -> Result<()> {
         for n in next {
             if n == from {
                 // from -> to -> ... -> id -> from
-                let mut back = vec![id];
-                while *back.last().unwrap() != to {
-                    back.push(prev[back.last().unwrap()]);
+                let (mut back, mut at) = (vec![id], id);
+                while at != to {
+                    let Some(&p) = prev.get(&at) else { break };
+                    at = p;
+                    back.push(at);
                 }
                 let mut path = vec![from];
                 path.extend(back.into_iter().rev());
@@ -266,7 +268,7 @@ fn check_cycle(conn: &Connection, from: i64, to: i64) -> Result<()> {
                     .collect::<Result<Vec<_>>>()?;
                 return Err(err(format!("blocks cycle: {}", keys.join(" blocks "))));
             }
-            if let std::collections::hash_map::Entry::Vacant(e) = prev.entry(n) {
+            if let Entry::Vacant(e) = prev.entry(n) {
                 e.insert(id);
                 queue.push_back(n);
             }
@@ -275,11 +277,11 @@ fn check_cycle(conn: &Connection, from: i64, to: i64) -> Result<()> {
     Ok(())
 }
 
-/// One event on each end, and bump both tasks' `updated_at`.
+/// One `linked` (`added`) or `unlinked` event on each end, and bump both tasks' `updated_at`.
 fn record(
     conn: &Connection,
     actor: &str,
-    action: EventKind,
+    added: bool,
     kind: LinkKind,
     (from, from_key): (i64, &str),
     (to, to_key): (i64, &str),
@@ -289,11 +291,12 @@ fn record(
         (to, kind.reverse(), from_key),
     ];
     for (id, field, other) in sides {
-        let (old, new) = match action {
-            EventKind::Unlinked => (Some(other), None),
-            _ => (None, Some(other)),
+        let (kind, old, new) = if added {
+            (EventKind::Linked, None, Some(other))
+        } else {
+            (EventKind::Unlinked, Some(other), None)
         };
-        db::record_event(conn, id, actor, action, Some(field), old, new)?;
+        db::record_event(conn, id, actor, kind, Some(field), old, new)?;
         conn.execute(
             &format!(
                 "UPDATE items SET updated_at = {} WHERE id = ?1",

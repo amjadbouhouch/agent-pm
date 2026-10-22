@@ -210,6 +210,85 @@ fn ready_and_blocked() {
 }
 
 #[test]
+fn a_status_named_blocked_counts_as_blocked() {
+    let env = env_tasks();
+    env.json(&["block", "APM-2"]);
+    assert_eq!(
+        ids(&env.json(&["list", "--ready", "-p", "APM"])),
+        ["APM-1", "APM-3", "APM-4"]
+    );
+    assert_eq!(ids(&env.json(&["list", "--blocked"])), ["APM-2"]);
+    // The name is matched case-insensitively, like the `block` shortcut.
+    env.json(&[
+        "status", "edit", "blocked", "-p", "APM", "--rename", "Blocked",
+    ]);
+    assert_eq!(ids(&env.json(&["list", "--blocked"])), ["APM-2"]);
+    // A blocked task that is also link-blocked is listed once.
+    env.json(&["link", "APM-1", "blocks", "APM-2"]);
+    assert_eq!(ids(&env.json(&["list", "--blocked"])), ["APM-2"]);
+}
+
+#[test]
+fn custom_closed_statuses_release_blocked_tasks() {
+    let env = env_tasks();
+    env.json(&[
+        "status",
+        "add",
+        "shipped",
+        "-p",
+        "APM",
+        "--category",
+        "done",
+    ]);
+    env.json(&[
+        "status",
+        "add",
+        "review",
+        "-p",
+        "APM",
+        "--category",
+        "active",
+    ]);
+    env.json(&["link", "APM-1", "blocks", "APM-2"]);
+    // An open custom status still blocks.
+    env.json(&["edit", "APM-1", "--status", "review"]);
+    assert_eq!(ids(&env.json(&["list", "--blocked"])), ["APM-2"]);
+    // A custom done-category status does not, and the blocker leaves --ready too.
+    env.json(&["edit", "APM-1", "--status", "shipped"]);
+    assert_eq!(ids(&env.json(&["list", "--blocked"])), Vec::<String>::new());
+    assert_eq!(
+        ids(&env.json(&["list", "--ready", "-p", "APM"])),
+        ["APM-2", "APM-3", "APM-4"]
+    );
+}
+
+#[test]
+fn link_and_unlink_bump_both_tasks() {
+    let env = env_tasks();
+    // Back-date both tasks so the bump is visible within the same second.
+    env.conn()
+        .execute("UPDATE items SET updated_at = '2000-01-01T00:00:00Z'", [])
+        .unwrap();
+    let updated = |key: &str| env.json(&["show", key])["updated_at"].clone();
+    env.json(&["link", "APM-1", "relates", "OPS-1"]);
+    assert_ne!(updated("APM-1"), "2000-01-01T00:00:00Z");
+    assert_ne!(updated("OPS-1"), "2000-01-01T00:00:00Z");
+    assert_eq!(updated("APM-2"), "2000-01-01T00:00:00Z");
+    env.conn()
+        .execute("UPDATE items SET updated_at = '2000-01-01T00:00:00Z'", [])
+        .unwrap();
+    env.json(&["unlink", "OPS-1", "relates", "APM-1"]);
+    assert_ne!(updated("APM-1"), "2000-01-01T00:00:00Z");
+    assert_ne!(updated("OPS-1"), "2000-01-01T00:00:00Z");
+    // A failed link bumps nothing.
+    env.conn()
+        .execute("UPDATE items SET updated_at = '2000-01-01T00:00:00Z'", [])
+        .unwrap();
+    env.json_err(&["unlink", "APM-1", "relates", "OPS-1"]);
+    assert_eq!(updated("APM-1"), "2000-01-01T00:00:00Z");
+}
+
+#[test]
 fn link_events_on_both_tasks() {
     let env = env_tasks();
     env.json(&["--as", "alice", "link", "APM-1", "blocks", "OPS-1"]);

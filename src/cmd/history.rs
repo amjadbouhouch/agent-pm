@@ -60,16 +60,18 @@ pub fn run(ctx: &Ctx, args: HistoryArgs) -> Result<()> {
 
 /// `<at> <actor> <kind> <field>: <old> → <new>`. Field changes always show both sides
 /// (`-` = empty); other kinds show only the value they carry (`created title`, `tagged bug`).
+/// Line breaks in values print as `\n` / `\r`, so every event stays on one line.
 fn line(e: &Event) -> String {
     let mut s = format!("{} {} {}", e.at, e.actor, e.kind);
     if let Some(f) = &e.field {
         s.push_str(&format!(" {f}:"));
     }
-    let dash = |v: &Option<String>| v.clone().unwrap_or_else(|| "-".to_string());
+    let one = |v: &str| v.replace('\r', "\\r").replace('\n', "\\n");
+    let dash = |v: &Option<String>| v.as_deref().map_or_else(|| "-".to_string(), one);
     match (e.kind.as_str(), &e.old, &e.new) {
         ("changed" | "attr", old, new) => s.push_str(&format!(" {} → {}", dash(old), dash(new))),
-        (_, Some(old), Some(new)) => s.push_str(&format!(" {old} → {new}")),
-        (_, Some(v), None) | (_, None, Some(v)) => s.push_str(&format!(" {v}")),
+        (_, Some(old), Some(new)) => s.push_str(&format!(" {} → {}", one(old), one(new))),
+        (_, Some(v), None) | (_, None, Some(v)) => s.push_str(&format!(" {}", one(v))),
         (_, None, None) => {}
     }
     s
@@ -113,6 +115,14 @@ mod tests {
             (
                 ev("linked", Some("blocks"), None, Some("APM-2")),
                 "linked blocks: APM-2",
+            ),
+            (
+                ev("commented", None, None, Some("a\nb\r\nc")),
+                r"commented a\nb\r\nc",
+            ),
+            (
+                ev("changed", Some("body"), Some("x\ny"), None),
+                r"changed body: x\ny → -",
             ),
         ];
         for (e, want) in cases {
