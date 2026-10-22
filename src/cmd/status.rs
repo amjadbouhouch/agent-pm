@@ -124,7 +124,8 @@ pub fn resolve(conn: &Connection, project_id: i64, name: &str) -> Result<i64> {
     find(conn, project_id, name)?.ok_or_else(|| err(format!("no such status: {name}")))
 }
 
-fn find(conn: &Connection, project_id: i64, name: &str) -> Result<Option<i64>> {
+/// Status id for a name within a project, case-insensitive, if it has one. Used by `move`.
+pub fn find(conn: &Connection, project_id: i64, name: &str) -> Result<Option<i64>> {
     Ok(conn
         .query_row(
             "SELECT id FROM statuses WHERE project_id = ?1 AND name = ?2 COLLATE NOCASE",

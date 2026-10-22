@@ -91,7 +91,20 @@ fn every_guide_example_runs_in_order() {
     let workflow = guide_examples(&guide, "WORKFLOW");
     let attrs = guide_examples(&guide, "CUSTOM ATTRIBUTES");
     let statuses = guide_examples(&guide, "STATUSES");
-    for args in workflow.iter().chain(&attrs).chain(&statuses) {
+    let links = guide_examples(&guide, "LINKS, TAGS, HISTORY");
+    let moves = guide_examples(
+        &guide,
+        "MOVE AND RENAME (old task ids and project keys keep resolving)",
+    );
+    let search = guide_examples(&guide, "SEARCH, SORT, DUE");
+    for args in workflow
+        .iter()
+        .chain(&attrs)
+        .chain(&statuses)
+        .chain(&links)
+        .chain(&moves)
+        .chain(&search)
+    {
         let out = env.apm().arg("--json").args(args).output().unwrap();
         assert!(
             out.status.success(),

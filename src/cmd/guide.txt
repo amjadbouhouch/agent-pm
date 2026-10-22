@@ -27,10 +27,6 @@ WORKFLOW
   apm list -p APM -a alice                           # open tasks only
   apm list -p APM --status done,cancelled            # explicit statuses
   apm list -m v1 --all                               # include done/cancelled
-  apm list --search "clap" --sort -priority,due --limit 5   # title, body, comments
-  apm list --overdue                                 # open tasks due before now
-  apm edit APM-2 --due 2026-11-20T17:00+01:00        # stored in UTC
-  apm list --due-after 2026-11-01 --due-before 2026-12-01
   apm show APM-1                                     # fields, subtasks, attrs, comments
   apm edit APM-1 --priority urgent --unset due
   apm milestone list -p APM                          # progress done/total
@@ -51,6 +47,28 @@ STATUSES
   apm edit APM-3 --status Review                     # names are case-insensitive
   apm status rm blocked -p APM --to review           # --to moves its tasks first
 
+LINKS, TAGS, HISTORY
+  apm link APM-1 blocks APM-3                        # kinds: blocks relates duplicates
+  apm list -p APM --ready                            # open, no open blocker (or --blocked)
+  apm edit APM-3 --tag perf --untag wip              # tags: lowercase a-z 0-9 _ : . -
+  apm list --tag perf                                # repeatable: all must match
+  apm tags -p APM                                    # tags by count
+  apm history APM-3 --limit 5                        # latest 5 events, oldest first
+  apm unlink APM-1 blocks APM-3
+
+MOVE AND RENAME (old task ids and project keys keep resolving)
+  apm project add OPS "operations"
+  apm move APM-3 OPS                                 # now OPS-1; subtasks move too
+  apm show APM-3                                     # finds OPS-1
+  apm project edit OPS --key INFRA                   # OPS-1 is now INFRA-1
+  apm attr edit points -p APM --rename estimate
+
+SEARCH, SORT, DUE
+  apm edit APM-1 --due 2026-11-20T17:00+01:00        # date or date-time; stored in UTC
+  apm list --search "clap" --sort -priority,due --limit 5   # title, body, comments
+  apm list --due-after 2026-11-01 --due-before 2026-12-01   # strict bounds
+  apm list --overdue                                 # open tasks due before now
+
 VALUES
   Status:   a status of the task's project; JSON has `status` and `status_category`.
   Category: todo | active | done | cancelled. New tasks get the first todo status;
@@ -61,15 +79,20 @@ VALUES
   Sort:     id created updated due priority status title; -key = descending; no due last.
   Checkbox: true/false/yes/no/1/0. Date attributes: YYYY-MM-DD; datetime: like due.
   `list` hides done/cancelled-category tasks unless --all or --status.
+  Blocked: open, with an open blocker or in a status named blocked; else --ready.
 
 COMMANDS
-  project add|list|show|edit|rm   manage projects (rm deletes everything in it)
-  add | list | show | edit | rm   tasks; filters: -p --status -a -m --parent --where
-                                  --search --due-before --due-after --overdue; --sort --limit
+  project add|list|show|edit|rm   manage projects (edit --key re-keys; rm deletes all in it)
+  add | list | show | edit | rm   tasks; filters: -p --status -a -m --parent --where --tag
+                                  --ready --blocked --search --due-before --due-after
+                                  --overdue; --sort --limit
+  link | unlink A KIND B          blocks (no cycles), relates, duplicates; show lists both ends
+  tags | history KEY-N            tag counts (-p KEY); a task's events (--limit N)
   start | done | block            status shortcuts
+  move KEY-N PROJECT              move a task and its subtasks, renumbered in PROJECT
   status list|add|edit|rm         custom statuses, -p KEY; a project keeps at least one
   milestone add|list|show|edit|close|reopen|rm   -p KEY; rm keeps its tasks
-  attr add|list|rm                custom attributes, -p KEY
+  attr add|edit|list|rm           custom attributes, -p KEY; edit --rename
   comment KEY-N TEXT              add a comment
   guide                           this text
   db                              database path and schema version

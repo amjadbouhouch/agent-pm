@@ -222,3 +222,85 @@ fn errors_are_text_without_json() {
         "error: no such attribute: nope"
     );
 }
+
+/// Project APM with tasks APM-1 and APM-2.
+fn env_tasks() -> Env {
+    let env = Env::new();
+    env.json(&["project", "add", "APM", "agent-pm"]);
+    env.json(&["add", "a", "-p", "APM"]);
+    env.json(&["add", "b", "--parent", "APM-1"]);
+    env
+}
+
+/// Text-mode stdout of a successful run.
+fn text(env: &Env, args: &[&str]) -> String {
+    let out = env.apm().args(args).assert().success();
+    String::from_utf8(out.get_output().stdout.clone()).unwrap()
+}
+
+// ---- attr edit --rename
+
+#[test]
+fn attr_rename_keeps_values() {
+    let env = env_tasks();
+    env.json(&["attr", "add", "points", "-p", "APM", "--type", "number"]);
+    env.json(&["edit", "APM-1", "--set", "points=3"]);
+    env.json(&["project", "edit", "APM", "--key", "OPS"]);
+    let a = env.json(&[
+        "attr", "edit", "points", "-p", "APM", "--rename", "estimate",
+    ]);
+    // The project in the output is the current key, even when an alias was passed.
+    assert_eq!(
+        a,
+        json!({"name": "estimate", "project": "OPS", "type": "number", "options": []})
+    );
+    assert_eq!(
+        env.json(&["show", "OPS-1"])["attributes"],
+        json!({"estimate": 3})
+    );
+    assert_eq!(
+        env.json(&["list", "--where", "estimate=3"])[0]["id"],
+        "OPS-1"
+    );
+    assert_eq!(
+        env.json(&["attr", "list", "-p", "APM"])[0]["project"],
+        "OPS"
+    );
+    assert_eq!(
+        text(
+            &env,
+            &["attr", "edit", "estimate", "-p", "OPS", "--rename", "pts"]
+        ),
+        "renamed attribute estimate to pts\n"
+    );
+}
+
+#[test]
+fn attr_rename_errors() {
+    let env = env_tasks();
+    env.json(&["attr", "add", "points", "-p", "APM", "--type", "number"]);
+    env.json(&["attr", "add", "size", "-p", "APM", "--type", "text"]);
+    let e = |name: &str, rename: &str| {
+        env.json_err(&["attr", "edit", name, "-p", "APM", "--rename", rename])
+    };
+    assert_eq!(e("points", "size"), "attribute already exists: size");
+    assert_eq!(e("points", "Status"), "built-in field: Status");
+    assert_eq!(
+        e("points", "a=b"),
+        "attribute name may not contain `=`: a=b"
+    );
+    assert_eq!(e("points", " "), "attribute name is empty");
+    assert_eq!(e("nope", "x"), "no such attribute: nope");
+    assert_eq!(
+        env.json_err(&["attr", "edit", "points", "-p", "APM"]),
+        "nothing to change: pass --rename"
+    );
+    let names: Vec<serde_json::Value> = env
+        .json(&["attr", "list", "-p", "APM"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["name"].clone())
+        .collect();
+    assert_eq!(names, ["points", "size"]);
+}

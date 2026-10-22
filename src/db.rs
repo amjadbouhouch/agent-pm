@@ -310,6 +310,17 @@ pub enum EventKind {
     Attr,
     /// A comment was added; new = its text.
     Commented,
+    /// The task moved to another project; old/new = its KEY-N before and after.
+    Moved,
+    /// A link was added; field = the link as seen from this task (`blocks`, `blocked_by`,
+    /// `relates`, `duplicates`, `duplicated_by`), new = the other task's KEY-N.
+    Linked,
+    /// A link was removed; field as for `Linked`, old = the other task's KEY-N.
+    Unlinked,
+    /// A tag was added; new = the tag.
+    Tagged,
+    /// A tag was removed; old = the tag.
+    Untagged,
 }
 
 impl EventKind {
@@ -319,6 +330,11 @@ impl EventKind {
             EventKind::Changed => "changed",
             EventKind::Attr => "attr",
             EventKind::Commented => "commented",
+            EventKind::Moved => "moved",
+            EventKind::Linked => "linked",
+            EventKind::Unlinked => "unlinked",
+            EventKind::Tagged => "tagged",
+            EventKind::Untagged => "untagged",
         }
     }
 }
@@ -341,15 +357,56 @@ pub fn record_event(
     Ok(())
 }
 
-/// Project id for a key, case-insensitive (`apm` finds `APM`).
+/// Project id for a key, case-insensitive (`apm` finds `APM`). A key the project had before a
+/// rename resolves through `project_aliases`. A live key and an alias never share a name:
+/// creating or renaming to a key deletes the alias of that name.
 pub fn project_id(conn: &Connection, key: &str) -> Result<i64> {
+    let key = key.to_uppercase();
     conn.query_row(
-        "SELECT id FROM projects WHERE key = ?1",
-        params![key.to_uppercase()],
+        "SELECT id FROM projects WHERE key = ?1
+         UNION ALL SELECT project_id FROM project_aliases WHERE key = ?1
+         LIMIT 1",
+        params![key],
         |r| r.get(0),
     )
     .optional()?
-    .ok_or_else(|| err(format!("no such project: {}", key.to_uppercase())))
+    .ok_or_else(|| err(format!("no such project: {key}")))
+}
+
+/// Make `key` a live key: drop the alias of that name, if any (a live key always wins).
+/// Call it in the transaction that creates or re-keys `project_id` (None for a new project) to
+/// `key`. Returns the current key of the other project the alias belonged to: its old ids
+/// under `key` stop resolving, and the caller should say so.
+pub fn claim_project_key(
+    conn: &Connection,
+    key: &str,
+    project_id: Option<i64>,
+) -> Result<Option<String>> {
+    let owner = conn
+        .query_row(
+            "DELETE FROM project_aliases WHERE key = ?1 RETURNING project_id",
+            params![key],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()?
+        .filter(|&owner| Some(owner) != project_id);
+    let Some(owner) = owner else {
+        return Ok(None);
+    };
+    Ok(Some(conn.query_row(
+        "SELECT key FROM projects WHERE id = ?1",
+        params![owner],
+        |r| r.get(0),
+    )?))
+}
+
+/// Take the next task number of a project. Call it inside the write transaction that uses it.
+pub fn next_seq(conn: &Connection, project_id: i64) -> Result<i64> {
+    Ok(conn.query_row(
+        "UPDATE projects SET next_seq = next_seq + 1 WHERE id = ?1 RETURNING next_seq - 1",
+        params![project_id],
+        |r| r.get(0),
+    )?)
 }
 
 /// Map a write's UNIQUE-constraint failure to `exists()` (e.g. `project already exists: X`).
@@ -409,19 +466,28 @@ pub fn parse_item_key(s: &str) -> Result<(String, i64)> {
     Ok((key, n))
 }
 
-/// Resolve `KEY-N` to an item.
+/// Resolve `KEY-N` to an item. The key may be an alias, and `N` a number the task had before
+/// it moved (`item_aliases`); either way the result is the task where it is now. Numbers are
+/// never reused, so a live number and an alias never collide.
 pub fn item(conn: &Connection, reference: &str) -> Result<ItemRef> {
     let (key, seq) = parse_item_key(reference)?;
     let project_id = project_id(conn, &key)?;
-    let id = conn
-        .query_row(
-            "SELECT id FROM items WHERE project_id = ?1 AND seq = ?2",
-            params![project_id, seq],
-            |r| r.get(0),
-        )
-        .optional()?
-        .ok_or_else(|| err(format!("no such item: {}", item_key(&key, seq))))?;
-    Ok(ItemRef { id, project_id })
+    conn.query_row(
+        "SELECT id, project_id FROM items WHERE project_id = ?1 AND seq = ?2
+         UNION ALL
+         SELECT i.id, i.project_id FROM item_aliases a JOIN items i ON i.id = a.item_id
+         WHERE a.project_id = ?1 AND a.seq = ?2
+         LIMIT 1",
+        params![project_id, seq],
+        |r| {
+            Ok(ItemRef {
+                id: r.get(0)?,
+                project_id: r.get(1)?,
+            })
+        },
+    )
+    .optional()?
+    .ok_or_else(|| err(format!("no such item: {}", item_key(&key, seq))))
 }
 
 #[cfg(test)]
