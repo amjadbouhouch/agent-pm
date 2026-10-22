@@ -719,3 +719,75 @@ fn body_input_errors() {
     let v: Value = serde_json::from_slice(&out.get_output().stderr).unwrap();
     assert_eq!(v["error"], "cannot both set and unset body");
 }
+
+// ---- no-op edits
+
+/// Set every task's updated_at to a fixed past time, so a bump is visible.
+fn age(env: &Env) {
+    env.conn()
+        .execute("UPDATE items SET updated_at = '2000-01-01T00:00:00Z'", [])
+        .unwrap();
+}
+
+#[test]
+fn edits_that_change_nothing_leave_updated_at() {
+    let env = env_apm();
+    env.json(&["attr", "add", "points", "-p", "APM", "--type", "number"]);
+    env.json(&[
+        "add", "t", "-p", "APM", "-a", "ann", "--set", "points=2", "--tag", "ui",
+    ]);
+    env.json(&["start", "APM-1"]);
+    age(&env);
+    let noops: [&[&str]; 7] = [
+        &["edit", "APM-1", "--title", "t"],
+        &["edit", "APM-1", "--status", "DOING", "-a", "ann"],
+        &["edit", "APM-1", "--set", "points=2.0"],
+        &["edit", "APM-1", "--untag", "absent", "--tag", "ui"],
+        &["edit", "APM-1", "--unset", "due", "--unset", "milestone"],
+        &["edit", "APM-1", "--unset", "body"],
+        &["start", "APM-1"],
+    ];
+    for args in noops {
+        let v = env.json(args);
+        assert_eq!(v["id"], "APM-1", "{args:?}");
+        assert_eq!(v["updated_at"], "2000-01-01T00:00:00Z", "{args:?}");
+    }
+    assert_eq!(
+        text(&env, &["edit", "APM-1", "--untag", "absent"]),
+        "unchanged APM-1\n"
+    );
+    assert_eq!(text(&env, &["start", "APM-1"]), "unchanged APM-1 (doing)\n");
+    // Nothing recorded either: created, started, tagged at creation only.
+    let events: i64 = env
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM events WHERE kind != 'tagged'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(events, 2);
+}
+
+#[test]
+fn real_changes_still_bump_updated_at() {
+    let env = env_apm();
+    env.json(&["attr", "add", "points", "-p", "APM", "--type", "number"]);
+    env.json(&["add", "t", "-p", "APM"]);
+    let changes: [&[&str]; 4] = [
+        &["edit", "APM-1", "--tag", "ui"],
+        &["edit", "APM-1", "--set", "points=3"],
+        &["edit", "APM-1", "--unset", "points"],
+        &["done", "APM-1"],
+    ];
+    for args in changes {
+        age(&env);
+        let v = env.json(args);
+        assert_ne!(v["updated_at"], "2000-01-01T00:00:00Z", "{args:?}");
+    }
+    age(&env);
+    assert_eq!(
+        text(&env, &["edit", "APM-1", "--title", "new"]),
+        "updated APM-1\n"
+    );
+}

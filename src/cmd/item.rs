@@ -564,18 +564,20 @@ pub fn edit(ctx: &Ctx, mut args: EditArgs) -> Result<()> {
         };
         set(col, cleared);
     }
-    sets.push(format!("updated_at = {}", db::NOW_SQL));
-    let id_mark = bind(&mut vals, item.id);
-    tx.execute(
-        &format!("UPDATE items SET {} WHERE id = {id_mark}", sets.join(", ")),
-        params_from_iter(vals.iter()),
-    )?;
+    if !sets.is_empty() {
+        let id_mark = bind(&mut vals, item.id);
+        tx.execute(
+            &format!("UPDATE items SET {} WHERE id = {id_mark}", sets.join(", ")),
+            params_from_iter(vals.iter()),
+        )?;
+    }
     attr::set_values(&tx, item.project_id, item.id, &args.set)?;
     record_changes(&tx, &ctx.actor, &before, &snapshot(&tx, item.id)?)?;
     tag::apply(&tx, &ctx.actor, item.id, &args.tags, &args.untags)?;
+    let verb = touch_if_changed(&tx, &before)?;
     tx.commit()?;
     let item = get(&ctx.conn, item.id)?;
-    output::written(ctx.json, &item, &format!("updated {}", item.id))
+    output::written(ctx.json, &item, &format!("{verb} {}", item.id))
 }
 
 pub fn set_status(ctx: &Ctx, args: KeyArg, shortcut: Shortcut) -> Result<()> {
@@ -584,19 +586,17 @@ pub fn set_status(ctx: &Ctx, args: KeyArg, shortcut: Shortcut) -> Result<()> {
     let status_id = status::for_shortcut(&tx, item.project_id, shortcut)?;
     let before = snapshot(&tx, item.id)?;
     tx.execute(
-        &format!(
-            "UPDATE items SET status_id = ?1, updated_at = {} WHERE id = ?2",
-            db::NOW_SQL
-        ),
+        "UPDATE items SET status_id = ?1 WHERE id = ?2",
         params![status_id, item.id],
     )?;
     record_changes(&tx, &ctx.actor, &before, &snapshot(&tx, item.id)?)?;
+    let verb = touch_if_changed(&tx, &before)?;
     tx.commit()?;
     let item = get(&ctx.conn, item.id)?;
     output::written(
         ctx.json,
         &item,
-        &format!("updated {} ({})", item.id, item.status),
+        &format!("{verb} {} ({})", item.id, item.status),
     )
 }
 
@@ -734,6 +734,27 @@ fn snapshot(conn: &Connection, id: i64) -> Result<Snapshot> {
         item: get(conn, id)?,
         attrs: attr::stored_values(conn, id)?,
     })
+}
+
+/// After a mutation: bump the task's `updated_at` if anything a reader sees changed (fields,
+/// attributes, tags) since `before`, and return the verb for the text line. A no-op edit is
+/// not an error, but it leaves the task as it was, timestamp included.
+fn touch_if_changed(conn: &Connection, before: &Snapshot) -> Result<&'static str> {
+    let id = before.item.row_id;
+    let after = snapshot(conn, id)?;
+    let same = before.attrs == after.attrs
+        && serde_json::to_value(&before.item)? == serde_json::to_value(&after.item)?;
+    if same {
+        return Ok("unchanged");
+    }
+    conn.execute(
+        &format!(
+            "UPDATE items SET updated_at = {} WHERE id = ?1",
+            db::NOW_SQL
+        ),
+        params![id],
+    )?;
+    Ok("updated")
 }
 
 /// Record a `changed` event for every built-in field and an `attr` event for every custom
