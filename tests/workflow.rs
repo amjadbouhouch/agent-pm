@@ -96,12 +96,14 @@ fn every_guide_example_runs_in_order() {
         &guide,
         "MOVE AND RENAME (old task ids and project keys keep resolving)",
     );
+    let search = guide_examples(&guide, "SEARCH, SORT, DUE");
     for args in workflow
         .iter()
         .chain(&attrs)
         .chain(&statuses)
         .chain(&links)
         .chain(&moves)
+        .chain(&search)
     {
         let out = env.apm().arg("--json").args(args).output().unwrap();
         assert!(

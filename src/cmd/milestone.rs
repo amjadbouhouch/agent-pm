@@ -16,7 +16,7 @@ pub enum MilestoneCmd {
         project: String,
         #[arg(short, long)]
         description: Option<String>,
-        /// Due date, YYYY-MM-DD
+        /// Due date YYYY-MM-DD, or date-time YYYY-MM-DDTHH:MM[:SS] with Z or ±HH:MM
         #[arg(long)]
         due: Option<String>,
     },
@@ -43,7 +43,7 @@ pub enum MilestoneCmd {
         rename: Option<String>,
         #[arg(short, long)]
         description: Option<String>,
-        /// New due date, YYYY-MM-DD ("" clears it)
+        /// New due date or date-time, as for add ("" clears it)
         #[arg(long)]
         due: Option<String>,
     },
@@ -205,9 +205,7 @@ fn add(
 ) -> Result<()> {
     let project_id = db::project_id(&ctx.conn, project)?;
     let name = clean_name(name)?;
-    if let Some(d) = &due {
-        model::check_date(d)?;
-    }
+    let due = due.as_deref().map(model::normalize_when).transpose()?;
     db::unique(
         ctx.conn.execute(
             "INSERT INTO milestones (project_id, name, description, due) VALUES (?1, ?2, ?3, ?4)",
@@ -318,7 +316,7 @@ fn edit(
         if d.is_empty() {
             Ok(None)
         } else {
-            model::check_date(&d).map(|_| Some(d))
+            model::normalize_when(&d).map(Some)
         }
     });
     let due = due.transpose()?;

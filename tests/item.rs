@@ -130,7 +130,7 @@ fn add_errors() {
     assert!(env.json_err(&["add", "x"]).contains("project is required"));
     assert_eq!(
         env.json_err(&["add", "x", "-p", "APM", "--due", "2026-02-30"]),
-        "invalid date `2026-02-30`, expected YYYY-MM-DD"
+        "invalid date/time `2026-02-30`, expected YYYY-MM-DD or YYYY-MM-DDTHH:MM[:SS] with Z or ±HH:MM"
     );
     assert_eq!(
         env.json_err(&["add", "x", "-p", "APM", "-m", "v9"]),

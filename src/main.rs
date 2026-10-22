@@ -5,11 +5,10 @@ mod error;
 mod model;
 mod output;
 
-use clap::Parser;
 use clap::error::ErrorKind;
 
 fn main() {
-    let cli = match cli::Cli::try_parse() {
+    let cli = match cli::Cli::parse_args() {
         Ok(cli) => cli,
         // --help / --version, and usage errors without --json: clap's own output and exit code.
         Err(e)

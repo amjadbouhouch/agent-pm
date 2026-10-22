@@ -40,6 +40,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     enable_wal(&conn)?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     migrate(&mut conn)?;
+    add_functions(&conn)?;
     Ok(conn)
 }
 
@@ -62,6 +63,19 @@ fn enable_wal(conn: &Connection) -> Result<()> {
             res => return Ok(res?),
         }
     }
+}
+
+/// SQL functions apm's queries use: `fold(text)`, Unicode lowercase (SQLite's `lower` and
+/// `LIKE` fold ASCII only). NULL stays NULL.
+fn add_functions(conn: &Connection) -> Result<()> {
+    use rusqlite::functions::FunctionFlags;
+    conn.create_scalar_function(
+        "fold",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| Ok(ctx.get::<Option<String>>(0)?.map(|s| s.to_lowercase())),
+    )?;
+    Ok(())
 }
 
 /// Schema migrations, applied in order. `PRAGMA user_version` = number applied.
