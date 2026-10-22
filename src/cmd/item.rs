@@ -464,7 +464,9 @@ pub fn show(ctx: &Ctx, args: ShowArgs) -> Result<()> {
         println!("tags: {}", i.tags.join(", "));
     }
     if !i.body.is_empty() {
-        println!("\n{}", i.body);
+        // Indented, so no body line reads like a field line.
+        println!();
+        print_text("  ", i.body.lines());
     }
     for (label, linked) in detail.links.groups() {
         if !linked.is_empty() {
@@ -488,7 +490,11 @@ pub fn show(ctx: &Ctx, args: ShowArgs) -> Result<()> {
     if !detail.comments.is_empty() {
         println!("\ncomments:");
         for c in &detail.comments {
-            println!("  {} {}: {}", c.created_at, c.author, c.body);
+            // Continuation lines of a multi-line comment are indented under it.
+            let mut lines = c.body.lines();
+            let first = lines.next().unwrap_or_default();
+            println!("  {} {}: {first}", c.created_at, c.author);
+            print_text("    ", lines);
         }
     }
     Ok(())
@@ -648,6 +654,17 @@ pub fn rm(ctx: &Ctx, args: KeyArg) -> Result<()> {
 /// A task as one line of `show`: id, status, title.
 fn line_row(id: &str, status: &str, title: &str) -> Vec<String> {
     vec![id.to_string(), status.to_string(), title.to_string()]
+}
+
+/// Lines of user text, each indented (blank lines stay empty).
+fn print_text<'a>(indent: &str, lines: impl Iterator<Item = &'a str>) {
+    for line in lines {
+        if line.trim().is_empty() {
+            println!();
+        } else {
+            println!("{indent}{line}");
+        }
+    }
 }
 
 /// Rows printed as aligned columns, indented by two spaces.
