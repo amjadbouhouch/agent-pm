@@ -87,6 +87,28 @@ apm history APM-3
 
 Data lives in `~/.agent-pm/apm.db`; override with `--db PATH` or `$APM_DB`.
 
+## Agent loop
+
+Several agents can work one project without picking the same task:
+
+```sh
+export APM_AGENT=bot
+apm --json next -p APM          # claim, assign and start the best ready task
+# ... work ...
+apm comment APM-4 "draft in docs/notes.md"
+apm claim APM-4 --ttl 4h        # renew the claim (default 2h, max 7d)
+apm done APM-4                  # closing a task releases its claim
+```
+
+`next` picks, in one transaction, the open task with the highest priority (then soonest due,
+then id) that has no open blocker, is not in a status named blocked, is not claimed by
+another agent and is unassigned or yours. A task the agent already holds comes first, so a
+restarted agent resumes it (`"renewed": true`); a task whose claimant's claim lapsed goes to
+the next agent. It prints `{"task": {...}, "renewed": false}`; when nothing is ready,
+`{"task": null, "renewed": false}` and exit code 3. A claim expires on its own; closing the
+task or `release` drops it early, `claim --steal` takes over someone else's, and
+`apm claims` lists the live ones.
+
 ## Commands
 
 | Command | What it does |
@@ -96,6 +118,7 @@ Data lives in `~/.agent-pm/apm.db`; override with `--db PATH` or `$APM_DB`.
 | `list` filters | `-p`, `--status`, `-a`, `-m`, `--parent`, `--where`, `--tag`, `--ready`, `--blocked`, `--search`, `--due-before`, `--due-after`, `--overdue`; `--sort`, `--limit`, `--all` |
 | `start`, `done`, `block` | Status shortcuts |
 | `move KEY-N PROJECT` | Move a task and its subtasks to another project, under new numbers |
+| `next`, `claim`, `release`, `claims` | Claim work so agents don't collide; `list --claimed/--unclaimed` |
 | `status list\|add\|edit\|rm` | Custom statuses per project |
 | `milestone add\|list\|show\|edit\|close\|reopen\|rm` | Milestones with progress |
 | `attr add\|edit\|list\|rm` | Custom attributes, set with `--set`, filtered with `--where` |

@@ -128,7 +128,7 @@ fn count(env: &Env, sql: &str) -> i64 {
 #[test]
 fn v1_database_upgrades_to_v2() {
     let env = v1_env();
-    assert_eq!(env.json(&["db"])["schema_version"], 2);
+    assert_eq!(env.json(&["db"])["schema_version"], 3);
 
     // Every task keeps its row id, number, fields and status (now a row of its project).
     let conn = env.conn();
@@ -291,7 +291,7 @@ fn concurrent_first_opens_migrate_once() {
                 let stderr = String::from_utf8_lossy(&out.stderr);
                 assert!(out.status.success(), "{stderr}");
                 let v: Value = serde_json::from_slice(&out.stdout).unwrap();
-                assert_eq!(v["schema_version"], 2);
+                assert_eq!(v["schema_version"], 3);
             })
         })
         .collect();
@@ -382,6 +382,48 @@ fn a_newer_schema_is_refused() {
     drop(conn);
     assert_eq!(
         env.json_err(&["db"]),
-        "database schema v99 is newer than this apm (v2); upgrade apm"
+        "database schema v99 is newer than this apm (v3); upgrade apm"
     );
+}
+
+/// A database as apm v0.2 left it (schema v2): today's schema without the v3 claim columns.
+fn v2_env() -> Env {
+    let env = Env::new();
+    env.json(&["project", "add", "APM", "Agent PM"]);
+    env.json(&["add", "first", "-p", "APM", "-a", "alice"]);
+    env.json(&["add", "second", "-p", "APM", "--priority", "high"]);
+    env.json(&["comment", "APM-1", "hello"]);
+    let conn = env.conn();
+    conn.execute_batch(
+        "DROP INDEX items_claim_expires;
+         ALTER TABLE items DROP COLUMN claim_expires;
+         ALTER TABLE items DROP COLUMN claimed_at;
+         ALTER TABLE items DROP COLUMN claimed_by;",
+    )
+    .unwrap();
+    conn.pragma_update(None, "user_version", 2).unwrap();
+    env
+}
+
+#[test]
+fn v2_database_upgrades_to_v3() {
+    let env = v2_env();
+    let before = env.json(&["list"]);
+    // Reading migrates; every task is as it was, with no claim.
+    assert_eq!(env.json(&["db"])["schema_version"], 3);
+    let after = env.json(&["list"]);
+    assert_eq!(after, before);
+    assert_eq!(after[0]["claim"], Value::Null);
+    assert_eq!(
+        count(
+            &env,
+            "SELECT count(*) FROM pragma_index_list('items') WHERE name = 'items_claim_expires'"
+        ),
+        1
+    );
+    // Claims work on the upgraded database.
+    let v = &env.json(&["next"])["task"];
+    assert_eq!(v["id"], "APM-2");
+    assert_eq!(v["claim"]["by"], "tester");
+    assert_eq!(env.json(&["show", "APM-1"])["comments"][0]["body"], "hello");
 }

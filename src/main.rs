@@ -27,8 +27,12 @@ fn main() {
         }
     };
     let json = cli.json;
-    if let Err(e) = cmd::run(cli) {
-        output::print_error(&e, json);
-        std::process::exit(1);
+    match cmd::run(cli) {
+        Ok(0) => {}
+        Ok(code) => std::process::exit(code),
+        Err(e) => {
+            output::print_error(&e, json);
+            std::process::exit(1);
+        }
     }
 }

@@ -259,6 +259,13 @@ CREATE TABLE item_aliases (
 );
 CREATE INDEX item_aliases_item ON item_aliases(item_id);
 "#,
+    // v3: claims ("agent X works on this until T"). A claim is live while claim_expires > now.
+    r#"
+ALTER TABLE items ADD COLUMN claimed_by TEXT;
+ALTER TABLE items ADD COLUMN claimed_at TEXT;
+ALTER TABLE items ADD COLUMN claim_expires TEXT;
+CREATE INDEX items_claim_expires ON items(claim_expires);
+"#,
 ];
 
 pub fn schema_version(conn: &Connection) -> Result<i64> {
@@ -345,6 +352,10 @@ pub enum EventKind {
     Tagged,
     /// A tag was removed; old = the tag.
     Untagged,
+    /// The actor claimed the task (or renewed their claim); new = when the claim expires.
+    Claimed,
+    /// A live claim was dropped; field = why (`manual`, `done`, `stolen`), old = its holder.
+    Released,
 }
 
 impl EventKind {
@@ -359,6 +370,8 @@ impl EventKind {
             EventKind::Unlinked => "unlinked",
             EventKind::Tagged => "tagged",
             EventKind::Untagged => "untagged",
+            EventKind::Claimed => "claimed",
+            EventKind::Released => "released",
         }
     }
 }

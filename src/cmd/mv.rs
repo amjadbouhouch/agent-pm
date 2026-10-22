@@ -9,7 +9,7 @@ use rusqlite::{Connection, params};
 use serde::{Serialize, Serializer};
 
 use super::item::{self, Item};
-use super::{Ctx, attr, milestone, status};
+use super::{Ctx, attr, claim, milestone, status};
 use crate::db::{self, EventKind};
 use crate::error::{Result, err};
 use crate::output;
@@ -87,6 +87,8 @@ pub fn run(ctx: &Ctx, args: MoveArgs) -> Result<()> {
         let lost = attr::move_values(&tx, id, target)?;
         let after = item::get(&tx, id)?;
         record(&tx, &ctx.actor, &before, &after, &lost)?;
+        // A move keeps a claim, unless the task lands in a closed status.
+        claim::release_if_closed(&tx, &ctx.actor, id)?;
         if !lost.is_empty() {
             dropped.insert(after.id.clone(), lost);
         }
