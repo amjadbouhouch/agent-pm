@@ -136,10 +136,71 @@ fn install_sh_requests_a_published_asset_on_every_platform() {
 }
 
 #[test]
-fn each_asset_ships_a_checksum_install_sh_verifies() {
-    // install.sh fetches "<asset>.sha256" and refuses to install on a mismatch.
+fn each_asset_ships_a_checksum_the_installers_verify() {
+    // The installers fetch "<asset>.sha256" and refuse to install on a mismatch.
     assert!(read(".github/workflows/release.yml").contains("> ${{ matrix.asset }}.sha256"));
     assert!(read("install.sh").contains("$ASSET.sha256"));
+    assert!(read("install.ps1").contains("\"$asset.sha256\""));
+}
+
+/// Runs install.ps1 against an empty mirror and returns the asset it requests.
+#[cfg(windows)]
+fn asset_requested_by_install_ps1() -> String {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(root().join("install.ps1"))
+        .arg("-BaseUrl")
+        .arg(tmp.path())
+        .arg("-Dir")
+        .arg(tmp.path().join("bin"))
+        .arg("-NoModifyPath")
+        .env("USERPROFILE", tmp.path())
+        .env("APM_PATH_REG_KEY", r"Software\agent-pm-test-unused")
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "install.ps1 should find no asset");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    stdout
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("source"))
+        .and_then(|src| src.trim().rsplit(['/', '\\']).next())
+        .unwrap_or_else(|| panic!("install.ps1 printed no asset name:\n{stdout}"))
+        .to_string()
+}
+
+#[test]
+fn install_ps1_requests_the_published_windows_asset() {
+    #[cfg(windows)]
+    let asset = asset_requested_by_install_ps1();
+    // No Windows PowerShell elsewhere: the name the script spells out.
+    #[cfg(not(windows))]
+    let asset = String::from("apm-windows-x64.exe");
+    assert!(read("install.ps1").contains(&format!("'{asset}'")));
+    assert!(
+        published_assets().contains(&asset),
+        "{asset} not in release.yml"
+    );
+}
+
+#[test]
+fn install_ps1_is_ascii() {
+    // Windows PowerShell 5.1 reads a script without a BOM in the ANSI code page.
+    let script = read("install.ps1");
+    let bad = script.lines().position(|l| !l.is_ascii());
+    assert_eq!(
+        bad,
+        None,
+        "non-ASCII on line {:?} of install.ps1",
+        bad.map(|n| n + 1)
+    );
 }
 
 #[test]

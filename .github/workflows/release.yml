@@ -41,7 +41,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Asset names must match what install.sh looks for:
+        # Asset names must match what install.sh and install.ps1 look for:
         # apm-<os>-<arch> (tests/release_assets.rs checks this).
         include:
           # 22.04: an older glibc, so the binary runs on older distros.
@@ -75,7 +75,7 @@ jobs:
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Checksum
-        # install.sh fetches this and refuses to install on a mismatch.
+        # The installers fetch this and refuse to install on a mismatch.
         # Written as "<hash>  <name>" by hand: macOS has shasum, not sha256sum,
         # and Git Bash's sha256sum marks binary files with "*".
         shell: bash

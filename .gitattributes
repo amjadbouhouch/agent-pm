@@ -4,5 +4,10 @@
 # The installer must keep LF endings or `sh` fails on the shebang.
 install.sh text eol=lf
 
+# install.ps1 stays LF too: raw.githubusercontent.com serves the LF blob to
+# `irm | iex` whatever the checkout uses, so the tests run the same bytes users
+# get. PowerShell 5.1 parses LF fine; what it needs is ASCII (no BOM -> ANSI).
+install.ps1 text eol=lf
+
 # Lockfile is generated; keep it out of diffs and language stats.
 Cargo.lock linguist-generated=true
