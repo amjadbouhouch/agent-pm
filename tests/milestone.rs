@@ -393,3 +393,37 @@ fn unknown_project_errors() {
         "no such project: NOPE"
     );
 }
+
+#[test]
+fn progress_counts_leaf_tasks_only() {
+    let env = Env::new();
+    project(&env, "APM");
+    env.json(&["milestone", "add", "v1", "-p", "APM"]);
+    // APM-1 has three subtasks in v1 (one done, one cancelled): it counts through them.
+    task(&env, "round", "doing", Some("v1"));
+    for (title, status) in [("a", "done"), ("b", "todo"), ("c", "cancelled")] {
+        env.json(&[
+            "add", title, "--parent", "APM-1", "-m", "v1", "--status", status,
+        ]);
+    }
+    // APM-5's only subtask is outside v1: APM-5 is the unit of work here.
+    task(&env, "solo", "done", Some("v1"));
+    env.json(&["add", "elsewhere", "--parent", "APM-5"]);
+    // A nested round: APM-7 > APM-8 > APM-9, all in v1; only APM-9 counts.
+    task(&env, "outer", "todo", Some("v1"));
+    env.json(&["add", "middle", "--parent", "APM-7", "-m", "v1"]);
+    env.json(&[
+        "add", "inner", "--parent", "APM-8", "-m", "v1", "--status", "done",
+    ]);
+    let v = env.json(&["milestone", "show", "v1", "-p", "APM"]);
+    assert_eq!(
+        v["progress"],
+        serde_json::json!({"total": 4, "done": 3, "cancelled": 1})
+    );
+    // Every task in the milestone is still listed.
+    assert_eq!(v["items"].as_array().unwrap().len(), 8);
+    assert_eq!(
+        env.json(&["milestone", "list", "-p", "APM"])[0]["progress"]["total"],
+        4
+    );
+}
