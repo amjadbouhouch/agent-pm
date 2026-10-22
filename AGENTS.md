@@ -71,13 +71,17 @@ scripts/           version-updater.cjs for commit-and-tag-version
 ## Releasing
 
 ```sh
+# first release only: tags the current 0.1.0 without bumping
+npx commit-and-tag-version --first-release
+git push --follow-tags origin main
+
+# every later release
 npx commit-and-tag-version --dry-run          # preview the bump and changelog
 npx commit-and-tag-version                    # bump, write CHANGELOG.md, commit, tag vX.Y.Z
 git push --follow-tags origin main            # the tag push triggers release.yml
 ```
 
-The first release is `0.1.0` (already in Cargo.toml): use `--first-release`, which tags
-the current version without bumping. There is no package.json; `.versionrc.json` points the
+There is no package.json; `.versionrc.json` points the
 tool at `Cargo.toml` and `Cargo.lock` through `scripts/version-updater.cjs`, which rewrites
 only the `[package]` version and the lockfile's `apm` entry, so `--locked` builds keep
 passing after a bump.

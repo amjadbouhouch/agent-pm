@@ -11,19 +11,38 @@
  * instead of tagging a version the binary does not report.
  * tests/release_assets.rs asserts the two files and `apm --version` agree.
  */
-const LOCK = /(\[\[package\]\]\r?\nname = "apm"\r?\nversion = ")([^"]+)(")/;
-const TOML = /(^\[package\][^[]*?^version\s*=\s*")([^"]+)(")/m;
+const VERSION = /^(version\s*=\s*")([^"]+)(")/;
 
-const pattern = (contents) => {
-  if (contents.includes("[[package]]")) {
-    if (!LOCK.test(contents)) throw new Error('no apm package entry found in Cargo.lock');
-    return LOCK;
+/** Index of the version line in the table that starts at line `header`. */
+const versionLine = (lines, header) => {
+  for (let i = header + 1; i < lines.length && !lines[i].startsWith("["); i++) {
+    if (VERSION.test(lines[i])) return i;
   }
-  if (!TOML.test(contents)) throw new Error("no [package] version found in Cargo.toml");
-  return TOML;
+  return -1;
 };
 
-module.exports.readVersion = (contents) => contents.match(pattern(contents))[2];
+const find = (contents) => {
+  const lines = contents.split("\n");
+  const lock = contents.includes("[[package]]");
+  const header = lines.findIndex((l, i) =>
+    lock
+      ? l.trim() === "[[package]]" && (lines[i + 1] || "").trim() === 'name = "apm"'
+      : l.trim() === "[package]",
+  );
+  const at = header < 0 ? -1 : versionLine(lines, header);
+  if (at < 0) {
+    throw new Error(lock ? "no apm package entry found in Cargo.lock" : "no [package] version found in Cargo.toml");
+  }
+  return { lines, at };
+};
 
-module.exports.writeVersion = (contents, version) =>
-  contents.replace(pattern(contents), `$1${version}$3`);
+module.exports.readVersion = (contents) => {
+  const { lines, at } = find(contents);
+  return lines[at].match(VERSION)[2];
+};
+
+module.exports.writeVersion = (contents, version) => {
+  const { lines, at } = find(contents);
+  lines[at] = lines[at].replace(VERSION, `$1${version}$3`);
+  return lines.join("\n");
+};

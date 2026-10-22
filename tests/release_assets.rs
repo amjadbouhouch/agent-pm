@@ -8,11 +8,34 @@ use std::process::Command;
 
 use common::Env;
 
-const PLATFORMS: [(&str, &str, &str); 4] = [
-    ("Linux", "x86_64", "apm-linux-x64"),
-    ("Linux", "aarch64", "apm-linux-arm64"),
-    ("Darwin", "x86_64", "apm-darwin-x64"),
-    ("Darwin", "arm64", "apm-darwin-arm64"),
+/// A platform as `uname -s` / `uname -m` report it, and the asset install.sh must ask for.
+struct Platform {
+    os: &'static str,
+    arch: &'static str,
+    asset: &'static str,
+}
+
+const PLATFORMS: [Platform; 4] = [
+    Platform {
+        os: "Linux",
+        arch: "x86_64",
+        asset: "apm-linux-x64",
+    },
+    Platform {
+        os: "Linux",
+        arch: "aarch64",
+        asset: "apm-linux-arm64",
+    },
+    Platform {
+        os: "Darwin",
+        arch: "x86_64",
+        asset: "apm-darwin-x64",
+    },
+    Platform {
+        os: "Darwin",
+        arch: "arm64",
+        asset: "apm-darwin-arm64",
+    },
 ];
 
 fn root() -> PathBuf {
@@ -23,8 +46,15 @@ fn read(path: &str) -> String {
     std::fs::read_to_string(root().join(path)).unwrap()
 }
 
+/// Whether the install.sh tests can run. `sh` is always there on Linux and macOS, so a
+/// missing one fails the test there; only Windows without Git Bash is skipped.
 fn have_sh() -> bool {
-    Command::new("sh").args(["-c", "true"]).status().is_ok()
+    let found = Command::new("sh").args(["-c", "true"]).status().is_ok();
+    assert!(found || cfg!(windows), "sh not found on PATH");
+    if !found {
+        eprintln!("skipped: no sh on PATH");
+    }
+    found
 }
 
 /// `PATH` with `dir` first.
@@ -86,7 +116,7 @@ fn published_assets() -> Vec<String> {
 
 #[test]
 fn release_publishes_every_unix_asset_and_the_windows_exe() {
-    let mut expected: Vec<String> = PLATFORMS.iter().map(|p| p.2.to_string()).collect();
+    let mut expected: Vec<String> = PLATFORMS.iter().map(|p| p.asset.to_string()).collect();
     expected.push("apm-windows-x64.exe".into());
     expected.sort();
     assert_eq!(published_assets(), expected);
@@ -95,13 +125,12 @@ fn release_publishes_every_unix_asset_and_the_windows_exe() {
 #[test]
 fn install_sh_requests_a_published_asset_on_every_platform() {
     if !have_sh() {
-        eprintln!("skipped: no sh on PATH");
         return;
     }
     let published = published_assets();
-    for (s, m, expected) in PLATFORMS {
-        let asset = asset_requested_on(s, m);
-        assert_eq!(asset, expected, "{s}/{m}");
+    for p in PLATFORMS {
+        let asset = asset_requested_on(p.os, p.arch);
+        assert_eq!(asset, p.asset, "{}/{}", p.os, p.arch);
         assert!(published.contains(&asset), "{asset} not in release.yml");
     }
 }
@@ -116,7 +145,6 @@ fn each_asset_ships_a_checksum_install_sh_verifies() {
 #[test]
 fn uninstall_keeps_the_database() {
     if !have_sh() {
-        eprintln!("skipped: no sh on PATH");
         return;
     }
     let home = tempfile::tempdir().unwrap();

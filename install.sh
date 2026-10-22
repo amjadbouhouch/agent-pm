@@ -4,20 +4,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/amjadbouhouch/agent-pm/main/install.sh | sh
 #
 # Installs a single self-contained binary. Re-running upgrades in place.
-#
-# Environment:
-#   APM_VERSION      version to install, e.g. v0.1.0 (default: latest release)
-#   APM_INSTALL_DIR  where to put the binary (default: ~/.agent-pm/bin)
-#   APM_REPO         GitHub repo to download releases from
-#   APM_BASE_URL     download from a mirror instead of GitHub releases
-#
-# Flags:
-#   --local            build from the current source tree instead of downloading
-#   --uninstall        remove the binary (your database in ~/.agent-pm is kept)
-#   --version X        install a specific version
-#   --dir DIR          install into DIR
-#   --modify-path      add the install dir to your shell profile without asking
-#   --no-modify-path   never touch a shell profile
+# Environment variables and flags: see usage() below, or run with --help.
 #
 # POSIX sh on purpose: this has to run under `| sh` on any machine.
 set -eu
@@ -39,6 +26,33 @@ else
   BOLD=''; DIM=''; RED=''; GREEN=''; YELLOW=''; RESET=''
 fi
 
+# Printed by --help. Not read from this file: under `curl | sh` there is no file.
+usage() {
+  cat <<'EOF'
+apm (agent-pm) installer.
+
+  curl -fsSL https://raw.githubusercontent.com/amjadbouhouch/agent-pm/main/install.sh | sh
+  curl -fsSL .../install.sh | sh -s -- --version v0.1.0
+
+Installs a single self-contained binary. Re-running upgrades in place.
+
+Environment:
+  APM_VERSION      version to install, e.g. v0.1.0 (default: latest release)
+  APM_INSTALL_DIR  where to put the binary (default: ~/.agent-pm/bin)
+  APM_REPO         GitHub repo to download releases from
+  APM_BASE_URL     download from a mirror instead of GitHub releases
+  APM_MODIFY_PATH  yes/no: edit the shell profile without asking (default: ask)
+
+Flags:
+  --local            build from the current source tree instead of downloading
+  --uninstall        remove the binary (your database in ~/.agent-pm is kept)
+  --version X        install a specific version
+  --dir DIR          install into DIR
+  --modify-path      add the install dir to your shell profile without asking
+  --no-modify-path   never touch a shell profile
+EOF
+}
+
 say()  { printf '%s\n' "$*"; }
 info() { printf '  %s\n' "$*"; }
 warn() { printf '%s!%s %s\n' "$YELLOW" "$RESET" "$*" >&2; }
@@ -55,7 +69,7 @@ while [ $# -gt 0 ]; do
     --version=*)      VERSION="${1#--version=}" ;;
     --dir)            shift; [ $# -gt 0 ] || err "--dir needs a value"; INSTALL_DIR="$1" ;;
     --dir=*)          INSTALL_DIR="${1#--dir=}" ;;
-    -h|--help)        sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)        usage; exit 0 ;;
     *)                err "unknown option: $1" ;;
   esac
   shift
@@ -92,7 +106,7 @@ detect_target() {
     *)             err "unsupported architecture: $arch (build from source with --local)" ;;
   esac
   # Releases are glibc builds; Alpine and friends have to build from source.
-  if [ "$os_part" = "linux" ] && ! (ldd /bin/sh 2>/dev/null | grep -q GNU); then
+  if [ "$os_part" = "linux" ]; then
     if [ -f /etc/alpine-release ] || (ldd --version 2>&1 | grep -qi musl); then
       err "musl libc is not supported by the release builds (build from source with --local)"
     fi
@@ -112,7 +126,11 @@ say ""
 PREVIOUS=$(previous_version)
 mkdir -p "$INSTALL_DIR"
 TMP_DIR=$(mktemp -d)
-trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
+# Signals exit (which runs the EXIT cleanup): under dash a trapped INT would
+# otherwise run the cleanup and carry on.
+trap 'rm -rf "$TMP_DIR"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 TMP_BIN="$TMP_DIR/$BIN_NAME"
 
 if [ "$MODE" = "local" ]; then
