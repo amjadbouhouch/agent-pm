@@ -9,7 +9,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use super::status::{self, Shortcut};
-use super::{Ctx, attr, comment, milestone};
+use super::{Ctx, attr, comment, link, milestone, tag};
 use crate::db::{self, EventKind};
 use crate::error::{Result, err};
 use crate::model::{Category, Priority, check_date, parse_pair};
@@ -49,6 +49,9 @@ pub struct AddArgs {
     /// Custom attribute value, name=value (repeatable)
     #[arg(long = "set", value_name = "NAME=VALUE", value_parser = parse_pair)]
     pub set: Vec<(String, String)>,
+    /// Tag, lowercase a-z 0-9 _ : . - (repeatable)
+    #[arg(long = "tag", value_name = "TAG")]
+    pub tags: Vec<String>,
 }
 
 #[derive(Args, Debug)]
@@ -71,6 +74,15 @@ pub struct ListArgs {
     /// Include done and cancelled tasks
     #[arg(long)]
     pub all: bool,
+    /// Only tasks with this tag (repeatable, all must match)
+    #[arg(long = "tag", value_name = "TAG")]
+    pub tags: Vec<String>,
+    /// Only open tasks with no open blocker, not in a status named blocked
+    #[arg(long, conflicts_with = "blocked")]
+    pub ready: bool,
+    /// Only open tasks with an open blocker or in a status named blocked
+    #[arg(long)]
+    pub blocked: bool,
 }
 
 #[derive(Args, Debug)]
@@ -99,6 +111,12 @@ pub struct EditArgs {
     /// Clear a field: assignee, due, milestone, parent, body, or a custom attribute name (repeatable)
     #[arg(long, value_name = "FIELD")]
     pub unset: Vec<String>,
+    /// Add a tag (repeatable)
+    #[arg(long = "tag", value_name = "TAG")]
+    pub tags: Vec<String>,
+    /// Remove a tag (repeatable)
+    #[arg(long = "untag", value_name = "TAG")]
+    pub untags: Vec<String>,
 }
 
 /// A task as printed: the `--json` item contract.
@@ -123,13 +141,16 @@ pub struct Item {
     pub created_at: String,
     pub updated_at: String,
     pub attributes: Map<String, Value>,
+    /// Sorted.
+    pub tags: Vec<String>,
 }
 
-/// `show`: the item plus its subtasks and comments.
+/// `show`: the item plus its links, subtasks and comments.
 #[derive(Serialize)]
 struct Detail {
     #[serde(flatten)]
     item: Item,
+    links: link::Links,
     subtasks: Vec<Item>,
     comments: Vec<comment::Comment>,
 }
@@ -212,6 +233,7 @@ pub fn add(ctx: &Ctx, args: AddArgs) -> Result<()> {
         Some(&args.title),
     )?;
     attr::set_values(&tx, project_id, id, &args.set)?;
+    tag::apply(&tx, &ctx.actor, id, &args.tags, &[])?;
     tx.commit()?;
     let item = get(&ctx.conn, id)?;
     output::written(ctx.json, &item, &format!("created {}", item.id))
@@ -284,6 +306,7 @@ pub fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
             }
         }
     }
+    list_links_and_tags(&args, &mut conds, &mut vals)?;
     let keep = attr::filter(conn, project_id, &args.filter)?;
     let cond = if conds.is_empty() {
         "1".to_string()
@@ -324,6 +347,7 @@ pub fn show(ctx: &Ctx, args: KeyArg) -> Result<()> {
     let r = db::item(conn, &args.key)?;
     let detail = Detail {
         item: get(conn, r.id)?,
+        links: link::for_item(conn, r.id)?,
         subtasks: query(conn, "i.parent_id = ?1", &[r.id.into()])?,
         comments: comment::for_item(conn, r.id)?,
     };
@@ -353,8 +377,19 @@ pub fn show(ctx: &Ctx, args: KeyArg) -> Result<()> {
             v => println!("attr {name}={v}"),
         }
     }
+    if !i.tags.is_empty() {
+        println!("tags: {}", i.tags.join(", "));
+    }
     if !i.body.is_empty() {
         println!("\n{}", i.body);
+    }
+    for (label, linked) in detail.links.groups() {
+        if !linked.is_empty() {
+            println!("\n{label}:");
+            for l in linked {
+                println!("  {}  {}  {}", l.id, l.status, l.title);
+            }
+        }
     }
     if !detail.subtasks.is_empty() {
         println!("\nsubtasks:");
@@ -383,10 +418,12 @@ pub fn edit(ctx: &Ctx, args: EditArgs) -> Result<()> {
         && args.milestone.is_none()
         && args.parent.is_none()
         && args.set.is_empty()
-        && args.unset.is_empty();
+        && args.unset.is_empty()
+        && args.tags.is_empty()
+        && args.untags.is_empty();
     if nothing {
         return Err(err(
-            "nothing to change: pass a field flag, --set or --unset",
+            "nothing to change: pass a field flag, --set, --unset, --tag or --untag",
         ));
     }
     if let Some(title) = &args.title {
@@ -472,6 +509,7 @@ pub fn edit(ctx: &Ctx, args: EditArgs) -> Result<()> {
     )?;
     attr::set_values(&tx, item.project_id, item.id, &args.set)?;
     record_changes(&tx, &ctx.actor, &before, &snapshot(&tx, item.id)?)?;
+    tag::apply(&tx, &ctx.actor, item.id, &args.tags, &args.untags)?;
     tx.commit()?;
     let item = get(&ctx.conn, item.id)?;
     output::written(ctx.json, &item, &format!("updated {}", item.id))
@@ -550,13 +588,45 @@ pub fn query(conn: &Connection, cond: &str, vals: &[SqlValue]) -> Result<Vec<Ite
             created_at: r.get(13)?,
             updated_at: r.get(14)?,
             attributes: Map::new(),
+            tags: Vec::new(),
         })
     })?;
     let mut items = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     for item in &mut items {
         item.attributes = attr::values_for_item(conn, item.row_id)?;
+        item.tags = tag::for_item(conn, item.row_id)?;
     }
     Ok(items)
+}
+
+/// `list --tag`, `--ready`, `--blocked` as conditions over `items i` / `statuses s`.
+/// Ready and blocked tasks are open ones, whatever `--all` says. A task is blocked when an
+/// open task blocks it or its status is named `blocked` (the `block` shortcut's status).
+fn list_links_and_tags(
+    args: &ListArgs,
+    conds: &mut Vec<String>,
+    vals: &mut Vec<SqlValue>,
+) -> Result<()> {
+    for t in &args.tags {
+        let mark = bind(vals, tag::normalize(t)?);
+        conds.push(tag::has_tag(&mark));
+    }
+    if args.ready || args.blocked {
+        let closed: Vec<String> = Category::value_variants()
+            .iter()
+            .filter(|c| c.is_closed())
+            .map(|c| bind(vals, c.as_str().to_string()))
+            .collect();
+        let closed = closed.join(", ");
+        conds.push(format!("s.category NOT IN ({closed})"));
+        let named = bind(vals, "blocked".to_string());
+        let not = if args.ready { "NOT " } else { "" };
+        conds.push(format!(
+            "{not}(s.name = {named} COLLATE NOCASE OR {})",
+            link::has_open_blocker(&closed)
+        ));
+    }
+    Ok(())
 }
 
 /// A task as history compares it: its fields and its stored attribute values.

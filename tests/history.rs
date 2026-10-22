@@ -1,8 +1,9 @@
-//! Task history: every mutation records rows in `events`. There is no `apm history` command
-//! yet, so these tests read the table directly.
+//! Task history: every mutation records rows in `events`. Most tests read the table directly;
+//! the `history_*` tests go through `apm history`.
 mod common;
 
 use common::Env;
+use serde_json::json;
 
 /// One events row: (actor, kind, field, old, new).
 type Event = (
@@ -217,4 +218,132 @@ fn events_go_with_their_task() {
         .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
         .unwrap();
     assert_eq!(n, 0);
+}
+
+#[test]
+fn history_command_after_a_sequence_of_mutations() {
+    let env = env_apm();
+    env.json(&["add", "other", "-p", "APM"]);
+    env.json(&["--as", "alice", "add", "t", "-p", "APM", "--tag", "bug"]);
+    env.json(&[
+        "--as", "bob", "edit", "APM-2", "--status", "doing", "--set", "points=2",
+    ]);
+    env.json(&["--as", "bob", "link", "APM-1", "blocks", "APM-2"]);
+    env.json(&[
+        "--as", "carol", "edit", "APM-2", "--tag", "ui", "--untag", "bug",
+    ]);
+    env.json(&["--as", "carol", "comment", "APM-2", "hi"]);
+    env.json(&["--as", "dave", "unlink", "APM-1", "blocks", "APM-2"]);
+    env.json(&["--as", "dave", "done", "APM-2"]);
+
+    let h = env.json(&["history", "apm-2"]);
+    let rows: Vec<Vec<serde_json::Value>> = h
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            let keys: Vec<&String> = e.as_object().unwrap().keys().collect();
+            assert_eq!(keys, ["actor", "at", "field", "kind", "new", "old"]);
+            assert!(e["at"].as_str().unwrap().ends_with('Z'));
+            ["actor", "kind", "field", "old", "new"]
+                .iter()
+                .map(|k| e[*k].clone())
+                .collect()
+        })
+        .collect();
+    let row = |a: &str, k: &str, f: Option<&str>, o: Option<&str>, n: Option<&str>| {
+        vec![json!(a), json!(k), json!(f), json!(o), json!(n)]
+    };
+    let expected = [
+        row("alice", "created", None, None, Some("t")),
+        row("alice", "tagged", None, None, Some("bug")),
+        row(
+            "bob",
+            "changed",
+            Some("status"),
+            Some("todo"),
+            Some("doing"),
+        ),
+        row("bob", "attr", Some("points"), None, Some("2")),
+        row("bob", "linked", Some("blocked_by"), None, Some("APM-1")),
+        row("carol", "tagged", None, None, Some("ui")),
+        row("carol", "untagged", None, Some("bug"), None),
+        row("carol", "commented", None, None, Some("hi")),
+        row("dave", "unlinked", Some("blocked_by"), Some("APM-1"), None),
+        row(
+            "dave",
+            "changed",
+            Some("status"),
+            Some("doing"),
+            Some("done"),
+        ),
+    ];
+    assert_eq!(rows, expected);
+
+    // --limit keeps the most recent N, still oldest first.
+    let last: Vec<_> = env
+        .json(&["history", "APM-2", "--limit", "2"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(last, ["unlinked", "changed"]);
+    assert_eq!(
+        env.json(&["history", "APM-2", "--limit", "99"])
+            .as_array()
+            .unwrap()
+            .len(),
+        10
+    );
+}
+
+#[test]
+fn history_text_lines() {
+    let env = env_apm();
+    env.json(&["--as", "alice", "add", "t", "-p", "APM"]);
+    env.json(&[
+        "--as",
+        "bob",
+        "edit",
+        "APM-1",
+        "--status",
+        "doing",
+        "--due",
+        "2026-12-01",
+    ]);
+    env.json(&["--as", "bob", "edit", "APM-1", "--tag", "ui"]);
+    env.json(&["--as", "bob", "comment", "APM-1", "line one\nline two"]);
+    let out = env.apm().args(["history", "APM-1"]).assert().success();
+    let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    // Drop the timestamp column.
+    let lines: Vec<&str> = text.lines().map(|l| l.split_once(' ').unwrap().1).collect();
+    assert_eq!(
+        lines,
+        [
+            "alice created t",
+            "bob changed status: todo → doing",
+            "bob changed due: - → 2026-12-01",
+            "bob tagged ui",
+            // One line per event: line breaks print as \n (JSON keeps the real text).
+            r"bob commented line one\nline two",
+        ]
+    );
+    assert_eq!(
+        env.json(&["history", "APM-1"])[4]["new"],
+        "line one\nline two"
+    );
+}
+
+#[test]
+fn history_errors() {
+    let env = env_apm();
+    assert_eq!(env.json_err(&["history", "APM-1"]), "no such item: APM-1");
+    env.json(&["add", "t", "-p", "APM"]);
+    for bad in ["0", "-1", "x"] {
+        env.apm()
+            .args(["history", "APM-1", "--limit", bad])
+            .assert()
+            .code(2);
+    }
 }

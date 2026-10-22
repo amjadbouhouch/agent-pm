@@ -298,6 +298,15 @@ pub enum EventKind {
     Commented,
     /// The task moved to another project; old/new = its KEY-N before and after.
     Moved,
+    /// A link was added; field = the link as seen from this task (`blocks`, `blocked_by`,
+    /// `relates`, `duplicates`, `duplicated_by`), new = the other task's KEY-N.
+    Linked,
+    /// A link was removed; field as for `Linked`, old = the other task's KEY-N.
+    Unlinked,
+    /// A tag was added; new = the tag.
+    Tagged,
+    /// A tag was removed; old = the tag.
+    Untagged,
 }
 
 impl EventKind {
@@ -308,6 +317,10 @@ impl EventKind {
             EventKind::Attr => "attr",
             EventKind::Commented => "commented",
             EventKind::Moved => "moved",
+            EventKind::Linked => "linked",
+            EventKind::Unlinked => "unlinked",
+            EventKind::Tagged => "tagged",
+            EventKind::Untagged => "untagged",
         }
     }
 }

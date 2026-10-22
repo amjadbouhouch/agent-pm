@@ -39,7 +39,8 @@ fn guide_mentions_every_command() {
 #[test]
 fn guide_is_compact() {
     let env = Env::new();
-    assert!(guide_text(&env).lines().count() <= 80);
+    // Compact enough to read in one go; v2 (statuses, links, tags, history, move) needs ~100.
+    assert!(guide_text(&env).lines().count() <= 120);
 }
 
 #[test]

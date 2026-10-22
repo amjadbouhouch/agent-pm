@@ -46,6 +46,10 @@ apm start APM-1
 apm comment APM-1 "clap derive works"
 apm list -p APM
 apm --json show APM-1
+apm add "cache layer" -p APM --tag perf
+apm link APM-1 blocks APM-3               # also relates, duplicates
+apm list -p APM --ready                   # open tasks with no open blocker
+apm history APM-3
 ```
 
 Data lives in `~/.agent-pm/apm.db`; override with `--db PATH` or `$APM_DB`.
@@ -62,6 +66,9 @@ Data lives in `~/.agent-pm/apm.db`; override with `--db PATH` or `$APM_DB`.
 | `milestone add\|list\|show\|edit\|close\|reopen\|rm` | Milestones with progress |
 | `attr add\|edit\|list\|rm` | Custom attributes (text, number, select, date, checkbox), set with `--set`, filtered with `--where` |
 | `comment KEY-N TEXT` | Comment on a task |
+| `link\|unlink A blocks\|relates\|duplicates B` | Links between tasks (cross-project); `list --ready` / `--blocked` |
+| `tags`, `add/edit --tag`, `edit --untag` | Lowercase tags, filtered with `list --tag` |
+| `history KEY-N` | A task's change history, oldest first |
 | `guide` | Compact usage guide for agents |
 | `db` | Database path and schema version |
 

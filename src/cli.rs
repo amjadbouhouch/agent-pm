@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-use crate::cmd::{attr, comment, item, milestone, mv, project, status};
+use crate::cmd::{attr, comment, history, item, link, milestone, mv, project, status, tag};
 
 /// agent-pm: a small project tracker for agents and humans.
 #[derive(Parser, Debug)]
@@ -58,6 +58,14 @@ pub enum Command {
     Attr(attr::AttrCmd),
     /// Add a comment to a task
     Comment(comment::CommentArgs),
+    /// Link two tasks: A blocks|relates|duplicates B
+    Link(link::LinkArgs),
+    /// Remove a link between two tasks
+    Unlink(link::LinkArgs),
+    /// List tags with their task counts
+    Tags(tag::TagsArgs),
+    /// Show a task's change history, oldest first
+    History(history::HistoryArgs),
     /// Print a compact usage guide for agents
     Guide,
     /// Show the database path and schema version
