@@ -16,24 +16,22 @@ fn count(env: &Env, sql: &str) -> i64 {
 /// One events row: (kind, field, old, new).
 type Event = (String, Option<String>, Option<String>, Option<String>);
 
-/// The events of a task, oldest first, found by its current KEY-N.
+/// The events of a task, oldest first, from `apm history`.
 fn events(env: &Env, key: &str) -> Vec<Event> {
-    let id = env.json(&["show", key])["id"].as_str().unwrap().to_string();
-    let (project, seq) = id.split_once('-').unwrap();
-    let conn = env.conn();
-    let mut stmt = conn
-        .prepare(
-            "SELECT e.kind, e.field, e.old, e.new FROM events e
-             JOIN items i ON i.id = e.item_id JOIN projects p ON p.id = i.project_id
-             WHERE p.key = ?1 AND i.seq = ?2 ORDER BY e.id",
-        )
-        .unwrap();
-    stmt.query_map(rusqlite::params![project, seq], |r| {
-        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-    })
-    .unwrap()
-    .collect::<rusqlite::Result<_>>()
-    .unwrap()
+    let s = |v: &Value| v.as_str().map(str::to_string);
+    env.json(&["history", key])
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                s(&e["kind"]).unwrap(),
+                s(&e["field"]),
+                s(&e["old"]),
+                s(&e["new"]),
+            )
+        })
+        .collect()
 }
 
 fn ev(kind: &str, field: Option<&str>, old: Option<&str>, new: Option<&str>) -> Event {
@@ -199,28 +197,25 @@ fn moving_twice_and_back_chains_aliases() {
 #[test]
 fn move_keeps_tags_links_comments_and_history() {
     let env = seeded();
-    // B2 builds the tag and link commands; seed the rows directly.
-    env.conn()
-        .execute_batch(
-            "INSERT INTO tags (item_id, tag) SELECT id, 'ui' FROM items WHERE title = 'root';
-             INSERT INTO links (from_id, to_id, kind)
-                 SELECT a.id, b.id, 'blocks' FROM items a, items b
-                 WHERE a.title = 'root' AND b.title = 'other';",
-        )
-        .unwrap();
+    env.json(&["edit", "APM-2", "--tag", "ui"]);
+    env.json(&["link", "APM-2", "blocks", "APM-5"]);
     env.json(&["move", "APM-2", "OPS"]);
-    let tags = count(
-        &env,
-        "SELECT count(*) FROM tags t JOIN items i ON i.id = t.item_id
-         WHERE i.title = 'root' AND t.tag = 'ui'",
+    let v = env.json(&["show", "OPS-2"]);
+    assert_eq!(v["tags"], json!(["ui"]));
+    assert_eq!(v["links"]["blocks"][0]["id"], "APM-5");
+    assert_eq!(v["comments"][0]["body"], "keep me");
+    assert_eq!(
+        env.json(&["show", "APM-5"])["links"]["blocked_by"][0]["id"],
+        "OPS-2"
     );
-    assert_eq!(tags, 1);
-    assert_eq!(count(&env, "SELECT count(*) FROM links"), 1);
+    assert_eq!(env.json(&["list", "--tag", "ui"])[0]["id"], "OPS-2");
     assert_eq!(
         events(&env, "OPS-2"),
         [
             ev("created", None, None, Some("root")),
             ev("commented", None, None, Some("keep me")),
+            ev("tagged", None, None, Some("ui")),
+            ev("linked", Some("blocks"), None, Some("APM-5")),
             ev("moved", None, Some("APM-2"), Some("OPS-2")),
             ev("changed", Some("status"), Some("doing"), Some("Doing")),
             ev("changed", Some("parent"), Some("APM-1"), None),

@@ -1,4 +1,5 @@
-//! Cross-slice tests: projects, tasks, milestones, comments and attributes together.
+//! Cross-slice tests: projects, tasks, milestones, comments, attributes, statuses, links,
+//! tags, moves and history together.
 
 mod common;
 
@@ -22,18 +23,25 @@ fn env_apm() -> Env {
 }
 
 /// Split a guide example line into args: whitespace-separated, `"..."` quoted, `#` starts a
-/// comment.
+/// comment. A comment holding `apm ` is two examples run together on one line (APM-18): the
+/// second would never run, so it fails.
 fn shell_words(line: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut word = String::new();
     let (mut quoted, mut started) = (false, false);
-    for c in line.chars() {
+    for (i, c) in line.char_indices() {
         match c {
             '"' => {
                 quoted = !quoted;
                 started = true;
             }
-            '#' if !quoted && !started => break,
+            '#' if !quoted && !started => {
+                assert!(
+                    !line[i..].contains("apm "),
+                    "example inside a comment, put it on its own line: {line}"
+                );
+                break;
+            }
             c if c.is_whitespace() && !quoted => {
                 if started {
                     words.push(std::mem::take(&mut word));
@@ -82,6 +90,15 @@ fn shell_words_splits_like_the_guide_means() {
         ["apm", "add", "a b", "-p", "APM"]
     );
     assert_eq!(shell_words(r#"apm x "" y"#), ["apm", "x", "", "y"]);
+}
+
+#[test]
+#[should_panic(expected = "example inside a comment")]
+fn shell_words_rejects_an_example_in_a_comment() {
+    // APM-18: the edit sat in the list's comment and never ran.
+    shell_words(
+        "  apm list -p APM --ready                            # open, no open blocker (or --blocked)  apm edit APM-3 --tag perf --untag wip              # tags: lowercase",
+    );
 }
 
 #[test]
@@ -405,4 +422,292 @@ fn guide_examples_reads_whole_sections() {
 #[should_panic(expected = "A:   note")]
 fn guide_examples_rejects_non_commands() {
     guide_examples("A\n  apm one\n  note\n", "A");
+}
+
+/// The `id`s of `apm list` with these args.
+fn list(env: &Env, args: &[&str]) -> Vec<String> {
+    let mut all = vec!["list"];
+    all.extend(args);
+    ids(&env.json(&all))
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+/// v2 across slices: custom statuses, tags, links, `--ready`/`--blocked`, move, re-key,
+/// search and sort, and history, all through real commands.
+#[test]
+fn v2_story() {
+    let env = env_apm();
+    env.json(&["project", "add", "OPS", "operations"]);
+    env.json(&[
+        "status",
+        "add",
+        "review",
+        "-p",
+        "APM",
+        "--category",
+        "active",
+        "--position",
+        "3",
+    ]);
+    env.json(&[
+        "add",
+        "design schema",
+        "-p",
+        "APM",
+        "--tag",
+        "db",
+        "--tag",
+        "V2",
+    ]);
+    env.json(&["add", "write migration", "-p", "APM", "--tag", "db"]);
+    env.json(&["add", "ship it", "-p", "APM", "--tag", "release"]);
+    env.json(&["link", "APM-1", "blocks", "APM-2"]);
+    env.json(&["link", "APM-2", "blocks", "APM-3"]);
+    assert_eq!(list(&env, &["--ready"]), ["APM-1"]);
+    assert_eq!(list(&env, &["--blocked"]), ["APM-2", "APM-3"]);
+
+    // A custom active status keeps the task open: its blockers stay blocked.
+    let v = env.json(&["edit", "APM-1", "--status", "REVIEW"]);
+    assert_eq!(
+        (&v["status"], &v["status_category"]),
+        (&json!("review"), &json!("active"))
+    );
+    assert_eq!(list(&env, &["--blocked"]), ["APM-2", "APM-3"]);
+    env.json(&["comment", "APM-2", "needs the schema first"]);
+    env.json(&["done", "APM-1"]);
+    assert_eq!(list(&env, &["--ready"]), ["APM-2"]);
+    assert_eq!(list(&env, &["--blocked"]), ["APM-3"]);
+
+    // Move the linked, tagged, commented task: everything follows it, the old id resolves.
+    let v = env.json(&["move", "APM-2", "OPS"]);
+    assert_eq!(v["id"], "OPS-1");
+    assert_eq!(v["renumbered"], json!({"APM-2": "OPS-1"}));
+    let v = env.json(&["show", "APM-2"]);
+    assert_eq!(v["id"], "OPS-1");
+    assert_eq!(v["tags"], json!(["db"]));
+    assert_eq!(v["links"]["blocked_by"][0]["id"], "APM-1");
+    assert_eq!(v["links"]["blocks"][0]["id"], "APM-3");
+    assert_eq!(v["comments"][0]["body"], "needs the schema first");
+    // The cross-project blocker still counts.
+    assert_eq!(list(&env, &["--blocked"]), ["APM-3"]);
+    assert_eq!(list(&env, &["-p", "OPS", "--ready"]), ["OPS-1"]);
+
+    // Re-key OPS: both old ids resolve, filters take the old key, output shows the new one.
+    env.json(&["project", "edit", "OPS", "--key", "INFRA"]);
+    for old in ["APM-2", "OPS-1", "infra-1"] {
+        assert_eq!(env.json(&["show", old])["id"], "INFRA-1", "{old}");
+    }
+    assert_eq!(list(&env, &["-p", "OPS", "--tag", "db"]), ["INFRA-1"]);
+    assert_eq!(
+        env.json(&["tags", "-p", "OPS"]),
+        json!([{"tag": "db", "count": 1}])
+    );
+    // Search covers titles and comments, across projects; sort and limit apply after.
+    assert_eq!(
+        list(&env, &["--all", "--search", "SCHEMA", "--sort", "-id"]),
+        ["INFRA-1", "APM-1"]
+    );
+    assert_eq!(
+        list(
+            &env,
+            &["--all", "--tag", "db", "--sort", "-id", "--limit", "1"]
+        ),
+        ["INFRA-1"]
+    );
+    // Status sorts by project, then the status's position in it.
+    assert_eq!(
+        list(&env, &["--all", "--tag", "db", "--sort", "status"]),
+        ["APM-1", "INFRA-1"]
+    );
+    assert_eq!(
+        list(&env, &["--all", "-p", "APM", "--sort", "-status"]),
+        ["APM-1", "APM-3"]
+    );
+
+    // History of the moved task, through its first id.
+    let kinds: Vec<(String, String)> = env
+        .json(&["history", "APM-2"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            let s = |k: &str| e[k].as_str().unwrap_or("").to_string();
+            (
+                s("kind"),
+                format!("{} {} {}", s("field"), s("old"), s("new")),
+            )
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ("created".into(), "  write migration".into()),
+            ("tagged".into(), "  db".into()),
+            ("linked".into(), "blocked_by  APM-1".into()),
+            ("linked".into(), "blocks  APM-3".into()),
+            ("commented".into(), "  needs the schema first".into()),
+            ("moved".into(), " APM-2 OPS-1".into()),
+        ]
+    );
+
+    // Closing the last blocker frees the last task.
+    env.json(&["done", "INFRA-1"]);
+    assert_eq!(list(&env, &["--ready"]), ["APM-3"]);
+    assert_eq!(list(&env, &["--blocked"]), Vec::<String>::new());
+}
+
+/// `apm <args> --help` and the help of every subcommand under it.
+fn all_help(env: &Env, args: &mut Vec<String>, out: &mut String) {
+    let run = env.apm().args(&*args).arg("--help").output().unwrap();
+    assert!(run.status.success(), "apm {} --help", args.join(" "));
+    let help = String::from_utf8(run.stdout).unwrap();
+    let subs: Vec<String> = help
+        .lines()
+        .skip_while(|l| !l.starts_with("Commands:"))
+        .skip(1)
+        .take_while(|l| l.starts_with("  "))
+        .filter_map(|l| l.split_whitespace().next())
+        .filter(|c| *c != "help")
+        .map(str::to_string)
+        .collect();
+    out.push_str(&help);
+    for sub in subs {
+        args.push(sub);
+        all_help(env, args, out);
+        args.pop();
+    }
+}
+
+/// Text output stays ASCII (grep-friendly): everything apm prints itself, on stdout and
+/// stderr, across every command group, the guide and every --help. User data may be anything.
+#[test]
+fn text_output_is_ascii() {
+    let env = Env::new();
+    let story: &[&[&str]] = &[
+        &["project", "add", "APM", "agent-pm", "-d", "the tracker"],
+        &["project", "add", "OPS", "ops"],
+        &[
+            "milestone",
+            "add",
+            "v1",
+            "-p",
+            "APM",
+            "--due",
+            "2026-12-01T09:00+02:00",
+        ],
+        &[
+            "attr",
+            "add",
+            "size",
+            "-p",
+            "APM",
+            "--type",
+            "select",
+            "--options",
+            "s,m",
+        ],
+        &["attr", "add", "at", "-p", "APM", "--type", "datetime"],
+        &[
+            "status",
+            "add",
+            "review",
+            "-p",
+            "APM",
+            "--category",
+            "active",
+        ],
+        &[
+            "add",
+            "École du soir",
+            "-p",
+            "APM",
+            "-m",
+            "v1",
+            "--tag",
+            "ui",
+            "--set",
+            "size=m",
+        ],
+        &[
+            "add",
+            "second",
+            "-p",
+            "APM",
+            "--due",
+            "2026-11-01",
+            "--set",
+            "at=2026-11-01T10:00Z",
+        ],
+        &["add", "sub", "--parent", "APM-1"],
+        &["link", "APM-1", "blocks", "APM-2"],
+        &["link", "APM-2", "relates", "APM-3"],
+        &["start", "APM-1"],
+        &[
+            "edit",
+            "APM-1",
+            "--status",
+            "review",
+            "--priority",
+            "high",
+            "--untag",
+            "ui",
+        ],
+        &["edit", "APM-2", "--unset", "due", "--unset", "at"],
+        &["comment", "APM-1", "multi\nline"],
+        &["block", "APM-2"],
+        &["done", "APM-3"],
+        &["list", "--all"],
+        &["list", "--ready"],
+        &[
+            "list",
+            "--blocked",
+            "--sort",
+            "-priority,due",
+            "--limit",
+            "5",
+        ],
+        &["list", "--search", "école", "--all"],
+        &["show", "APM-1"],
+        &["show", "APM-2"],
+        &["tags"],
+        &["history", "APM-1"],
+        &["history", "APM-2"],
+        &["move", "APM-1", "OPS"],
+        &["history", "OPS-1"],
+        &["project", "edit", "OPS", "--key", "INFRA"],
+        &["attr", "edit", "size", "-p", "APM", "--rename", "tshirt"],
+        &["status", "edit", "review", "-p", "APM", "--rename", "check"],
+        &["unlink", "INFRA-1", "blocks", "APM-2"],
+        &["status", "list", "-p", "APM"],
+        &["status", "rm", "check", "-p", "APM", "--to", "doing"],
+        &["milestone", "list", "-p", "APM"],
+        &["milestone", "show", "v1", "-p", "APM"],
+        &["milestone", "close", "v1", "-p", "APM"],
+        &["attr", "list", "-p", "APM"],
+        &["project", "list"],
+        &["project", "show", "APM"],
+        &["rm", "APM-2"],
+        &["db"],
+        &["guide"],
+        // Errors print on stderr.
+        &["show", "APM-99"],
+        &["link", "APM-3", "blocks", "APM-3"],
+        &["add", "x", "-p", "APM", "--due", "2026-02-30"],
+        &["list", "--sort", "nope"],
+        &["list", "--limit", "0"],
+        &["move", "APM-3", "APM"],
+    ];
+    let mut out = String::new();
+    for args in story {
+        let run = env.apm().args(*args).output().unwrap();
+        out.push_str(&String::from_utf8(run.stdout).unwrap());
+        out.push_str(&String::from_utf8(run.stderr).unwrap());
+    }
+    all_help(&env, &mut Vec::new(), &mut out);
+    assert!(out.contains("APM-1 -> OPS-1"), "the story ran: {out}");
+    for (n, line) in out.replace("École du soir", "").lines().enumerate() {
+        assert!(line.is_ascii(), "line {n}: {line}");
+    }
 }
