@@ -26,6 +26,16 @@ pub fn print_error(e: &AppError, json: bool) {
     }
 }
 
+/// A problem that does not fail the command (it already did its work): `warning: <msg>` on
+/// stderr, or `{"warning": "<msg>"}` under `--json`.
+pub fn print_warning(msg: &str, json: bool) {
+    if json {
+        eprintln!("{}", serde_json::json!({ "warning": msg }));
+    } else {
+        eprintln!("warning: {msg}");
+    }
+}
+
 /// Print rows as left-aligned columns separated by two spaces, under a header line.
 /// Prints nothing for no rows.
 pub fn table(headers: &[&str], rows: &[Vec<String>]) {

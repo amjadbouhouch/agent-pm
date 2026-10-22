@@ -240,7 +240,7 @@ fn place(conn: &Connection, project_id: i64, id: i64, position: Option<i64>) -> 
 }
 
 /// A new status name, trimmed. Commas are reserved: `list --status a,b` splits on them.
-fn clean_name(name: &str) -> Result<&str> {
+pub fn clean_name(name: &str) -> Result<&str> {
     let name = name.trim();
     if name.is_empty() {
         return Err(err("status name cannot be empty"));

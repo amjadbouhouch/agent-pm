@@ -65,6 +65,11 @@ MOVE AND RENAME (old task ids and project keys keep resolving)
   apm project edit OPS --key INFRA                   # OPS-1 is now INFRA-1
   apm attr edit points -p APM --rename estimate
 
+EXPORT, IMPORT, BACKUP
+  apm export -p APM -o apm.json                      # versioned JSON; no -p = all projects
+  apm import apm.json --key NEW --dry-run            # same KEY-N and history; all or nothing
+  apm backup --keep 7                                # copy to backups/ next to the db
+
 SEARCH, SORT, DUE
   apm edit APM-1 --due 2026-11-20T17:00+01:00        # date or date-time; stored in UTC
   apm list --search "clap" --sort -priority,due --limit 5   # title, body, comments
@@ -98,6 +103,7 @@ COMMANDS
   milestone add|list|show|edit|close|reopen|rm   -p KEY; rm keeps its tasks
   attr add|edit|list|rm           custom attributes, -p KEY; edit --rename
   comment KEY-N TEXT|-            add a comment (- reads stdin; --file PATH)
+  export | import FILE|- | backup  move projects between databases; copy the database
   guide                           this text
   db                              database path and schema version
   Every command has --help.
