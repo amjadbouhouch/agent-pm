@@ -635,6 +635,8 @@ fn text_output_is_ascii() {
             "second",
             "-p",
             "APM",
+            "--tag",
+            "db",
             "--due",
             "2026-11-01",
             "--set",
@@ -691,22 +693,41 @@ fn text_output_is_ascii() {
         &["rm", "APM-2"],
         &["db"],
         &["guide"],
-        // Errors print on stderr.
+    ];
+    // Errors print on stderr.
+    let errors: &[&[&str]] = &[
         &["show", "APM-99"],
         &["link", "APM-3", "blocks", "APM-3"],
         &["add", "x", "-p", "APM", "--due", "2026-02-30"],
         &["list", "--sort", "nope"],
         &["list", "--limit", "0"],
-        &["move", "APM-3", "APM"],
+        &["move", "INFRA-1", "OPS"],
     ];
     let mut out = String::new();
-    for args in story {
+    for (args, ok) in story
+        .iter()
+        .map(|a| (a, true))
+        .chain(errors.iter().map(|a| (a, false)))
+    {
         let run = env.apm().args(*args).output().unwrap();
+        let stderr = String::from_utf8(run.stderr).unwrap();
+        assert_eq!(run.status.success(), ok, "apm {}: {stderr}", args.join(" "));
         out.push_str(&String::from_utf8(run.stdout).unwrap());
-        out.push_str(&String::from_utf8(run.stderr).unwrap());
+        out.push_str(&stderr);
     }
+    // `apm db` prints the database path, which is the machine's, not apm's.
+    let path = env.db_path().display().to_string();
+    assert!(out.contains(&path), "apm db printed the path: {out}");
+    let mut out = out.replace(&path, "");
     all_help(&env, &mut Vec::new(), &mut out);
     assert!(out.contains("APM-1 -> OPS-1"), "the story ran: {out}");
+    assert!(
+        out.contains(
+            "
+db "
+        ),
+        "tags printed a tag: {out}"
+    );
     for (n, line) in out.replace("École du soir", "").lines().enumerate() {
         assert!(line.is_ascii(), "line {n}: {line}");
     }
