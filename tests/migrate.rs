@@ -192,9 +192,11 @@ fn v1_database_upgrades_to_v2() {
         env.json(&["project", "show", "APM"])["counts"],
         json!({"todo": 1, "doing": 1, "blocked": 1, "done": 1, "cancelled": 1})
     );
+    // v1 holds APM-1 > (APM-3, no milestone) > APM-4, and APM-5: APM-1 counts through its
+    // grandchild, so the units are APM-4 (done) and APM-5 (cancelled).
     assert_eq!(
         env.json(&["milestone", "show", "v1", "-p", "APM"])["progress"],
-        json!({"total": 2, "done": 1, "cancelled": 1})
+        json!({"total": 1, "done": 1, "cancelled": 1})
     );
     let open: Vec<Value> = env
         .json(&["list"])

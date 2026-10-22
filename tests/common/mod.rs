@@ -36,6 +36,18 @@ impl Env {
         serde_json::from_slice(&out.get_output().stdout).unwrap()
     }
 
+    /// Run `apm --json <args>` with `input` on stdin, assert success, parse stdout.
+    pub fn json_stdin(&self, args: &[&str], input: &str) -> Value {
+        let out = self
+            .apm()
+            .arg("--json")
+            .args(args)
+            .write_stdin(input)
+            .assert()
+            .success();
+        serde_json::from_slice(&out.get_output().stdout).unwrap()
+    }
+
     /// Direct connection to the (migrated) test database, for seeding rows a test needs
     /// that another command group creates. Prefer the CLI when the command exists.
     pub fn conn(&self) -> rusqlite::Connection {

@@ -3,6 +3,7 @@
 use clap::{Args, ValueEnum};
 use rusqlite::types::Value as SqlValue;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use rusqlite::{Connection, params, params_from_iter};
 use serde::Serialize;
@@ -13,12 +14,22 @@ use super::{Ctx, attr, comment, link, milestone, tag};
 use crate::db::{self, EventKind};
 use crate::error::{Result, err};
 use crate::model::{Category, Priority, When, normalize_when, parse_pair, parse_when};
-use crate::output;
+use crate::{input, output};
 
 #[derive(Args, Debug)]
 pub struct KeyArg {
     /// Task id, e.g. APM-12
     pub key: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ShowArgs {
+    /// Task id, e.g. APM-12
+    pub key: String,
+    /// Print only the task and all its subtasks, as an indented tree (no fields or comments);
+    /// with --json, the full object with `subtasks` nested at every level
+    #[arg(long)]
+    pub tree: bool,
 }
 
 #[derive(Args, Debug)]
@@ -43,9 +54,12 @@ pub struct AddArgs {
     /// Due date YYYY-MM-DD, or date-time YYYY-MM-DDTHH:MM[:SS] with Z or ±HH:MM (stored in UTC)
     #[arg(long)]
     pub due: Option<String>,
-    /// Longer description
+    /// Longer description, Markdown by convention; `-` reads stdin
     #[arg(short, long)]
     pub body: Option<String>,
+    /// Read the body from a file
+    #[arg(long, value_name = "PATH", conflicts_with = "body")]
+    pub body_file: Option<PathBuf>,
     /// Custom attribute value, name=value (repeatable)
     #[arg(long = "set", value_name = "NAME=VALUE", value_parser = parse_pair)]
     pub set: Vec<(String, String)>,
@@ -123,8 +137,12 @@ pub struct EditArgs {
     pub key: String,
     #[arg(long)]
     pub title: Option<String>,
+    /// New body, Markdown by convention; `-` reads stdin
     #[arg(short, long)]
     pub body: Option<String>,
+    /// Read the new body from a file
+    #[arg(long, value_name = "PATH", conflicts_with = "body")]
+    pub body_file: Option<PathBuf>,
     /// A status of the task's project
     #[arg(long)]
     pub status: Option<String>,
@@ -184,8 +202,18 @@ struct Detail {
     #[serde(flatten)]
     item: Item,
     links: link::Links,
-    subtasks: Vec<Item>,
+    subtasks: Vec<Node>,
     comments: Vec<comment::Comment>,
+}
+
+/// A subtask in `show`. With `--tree` it carries its own subtasks, recursively; without,
+/// it is a plain item.
+#[derive(Serialize)]
+struct Node {
+    #[serde(flatten)]
+    item: Item,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subtasks: Option<Vec<Node>>,
 }
 
 const SELECT: &str = "
@@ -198,8 +226,9 @@ const SELECT: &str = "
     LEFT JOIN milestones m ON m.id = i.milestone_id
     LEFT JOIN items par ON par.id = i.parent_id";
 
-pub fn add(ctx: &Ctx, args: AddArgs) -> Result<()> {
+pub fn add(ctx: &Ctx, mut args: AddArgs) -> Result<()> {
     check_title(&args.title)?;
+    args.body = input::read_text(args.body.take(), args.body_file.as_deref(), &input::BODY)?;
     let tx = db::write_tx(&ctx.conn)?;
     let parent = args
         .parent
@@ -365,25 +394,48 @@ pub fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
                 i.priority.clone(),
                 dash(&i.assignee),
                 dash(&i.due),
+                dash(&i.milestone),
                 title,
             ]
         })
         .collect();
-    output::table(&["ID", "STATUS", "PRI", "ASSIGNEE", "DUE", "TITLE"], &rows);
+    output::table(
+        &["ID", "STATUS", "PRI", "ASSIGNEE", "DUE", "MS", "TITLE"],
+        &rows,
+    );
     Ok(())
 }
 
-pub fn show(ctx: &Ctx, args: KeyArg) -> Result<()> {
+pub fn show(ctx: &Ctx, args: ShowArgs) -> Result<()> {
     let conn = &ctx.conn;
     let r = db::item(conn, &args.key)?;
+    let subtasks = if args.tree {
+        subtree(conn, r.id)?
+    } else {
+        query(conn, "i.parent_id = ?1", &[r.id.into()])?
+            .into_iter()
+            .map(|item| Node {
+                item,
+                subtasks: None,
+            })
+            .collect()
+    };
     let detail = Detail {
         item: get(conn, r.id)?,
         links: link::for_item(conn, r.id)?,
-        subtasks: query(conn, "i.parent_id = ?1", &[r.id.into()])?,
+        subtasks,
         comments: comment::for_item(conn, r.id)?,
     };
     if ctx.json {
         return output::json(&detail);
+    }
+    if args.tree {
+        let mut rows = Vec::new();
+        tree_rows(&detail.item, &detail.subtasks, 0, &mut rows);
+        for line in output::aligned(&rows) {
+            println!("{line}");
+        }
+        return Ok(());
     }
     let i = &detail.item;
     println!("{}  {}", i.id, i.title);
@@ -417,16 +469,21 @@ pub fn show(ctx: &Ctx, args: KeyArg) -> Result<()> {
     for (label, linked) in detail.links.groups() {
         if !linked.is_empty() {
             println!("\n{label}:");
-            for l in linked {
-                println!("  {}  {}  {}", l.id, l.status, l.title);
-            }
+            let rows: Vec<Vec<String>> = linked
+                .iter()
+                .map(|l| line_row(&l.id, &l.status, &l.title))
+                .collect();
+            print_indented(&rows);
         }
     }
     if !detail.subtasks.is_empty() {
         println!("\nsubtasks:");
-        for s in &detail.subtasks {
-            println!("  {}  {}  {}", s.id, s.status, s.title);
-        }
+        let rows: Vec<Vec<String>> = detail
+            .subtasks
+            .iter()
+            .map(|s| line_row(&s.item.id, &s.item.status, &s.item.title))
+            .collect();
+        print_indented(&rows);
     }
     if !detail.comments.is_empty() {
         println!("\ncomments:");
@@ -437,7 +494,8 @@ pub fn show(ctx: &Ctx, args: KeyArg) -> Result<()> {
     Ok(())
 }
 
-pub fn edit(ctx: &Ctx, args: EditArgs) -> Result<()> {
+pub fn edit(ctx: &Ctx, mut args: EditArgs) -> Result<()> {
+    args.body = input::read_text(args.body.take(), args.body_file.as_deref(), &input::BODY)?;
     let tx = db::write_tx(&ctx.conn)?;
     let item = db::item(&tx, &args.key)?;
     let nothing = args.title.is_none()
@@ -530,18 +588,20 @@ pub fn edit(ctx: &Ctx, args: EditArgs) -> Result<()> {
         };
         set(col, cleared);
     }
-    sets.push(format!("updated_at = {}", db::NOW_SQL));
-    let id_mark = bind(&mut vals, item.id);
-    tx.execute(
-        &format!("UPDATE items SET {} WHERE id = {id_mark}", sets.join(", ")),
-        params_from_iter(vals.iter()),
-    )?;
+    if !sets.is_empty() {
+        let id_mark = bind(&mut vals, item.id);
+        tx.execute(
+            &format!("UPDATE items SET {} WHERE id = {id_mark}", sets.join(", ")),
+            params_from_iter(vals.iter()),
+        )?;
+    }
     attr::set_values(&tx, item.project_id, item.id, &args.set)?;
     record_changes(&tx, &ctx.actor, &before, &snapshot(&tx, item.id)?)?;
     tag::apply(&tx, &ctx.actor, item.id, &args.tags, &args.untags)?;
+    let verb = touch_if_changed(&tx, &before)?;
     tx.commit()?;
     let item = get(&ctx.conn, item.id)?;
-    output::written(ctx.json, &item, &format!("updated {}", item.id))
+    output::written(ctx.json, &item, &format!("{verb} {}", item.id))
 }
 
 pub fn set_status(ctx: &Ctx, args: KeyArg, shortcut: Shortcut) -> Result<()> {
@@ -550,19 +610,17 @@ pub fn set_status(ctx: &Ctx, args: KeyArg, shortcut: Shortcut) -> Result<()> {
     let status_id = status::for_shortcut(&tx, item.project_id, shortcut)?;
     let before = snapshot(&tx, item.id)?;
     tx.execute(
-        &format!(
-            "UPDATE items SET status_id = ?1, updated_at = {} WHERE id = ?2",
-            db::NOW_SQL
-        ),
+        "UPDATE items SET status_id = ?1 WHERE id = ?2",
         params![status_id, item.id],
     )?;
     record_changes(&tx, &ctx.actor, &before, &snapshot(&tx, item.id)?)?;
+    let verb = touch_if_changed(&tx, &before)?;
     tx.commit()?;
     let item = get(&ctx.conn, item.id)?;
     output::written(
         ctx.json,
         &item,
-        &format!("updated {} ({})", item.id, item.status),
+        &format!("{verb} {} ({})", item.id, item.status),
     )
 }
 
@@ -585,6 +643,39 @@ pub fn rm(ctx: &Ctx, args: KeyArg) -> Result<()> {
         n => format!("deleted {} and {n} subtask(s)", item.id),
     };
     output::written(ctx.json, &item, &line)
+}
+
+/// A task as one line of `show`: id, status, title.
+fn line_row(id: &str, status: &str, title: &str) -> Vec<String> {
+    vec![id.to_string(), status.to_string(), title.to_string()]
+}
+
+/// Rows printed as aligned columns, indented by two spaces.
+fn print_indented(rows: &[Vec<String>]) {
+    for line in output::aligned(rows) {
+        println!("  {line}");
+    }
+}
+
+/// A task's subtasks, each with its own subtasks, recursively (by number).
+fn subtree(conn: &Connection, id: i64) -> Result<Vec<Node>> {
+    query(conn, "i.parent_id = ?1", &[id.into()])?
+        .into_iter()
+        .map(|item| {
+            let subtasks = Some(subtree(conn, item.row_id)?);
+            Ok(Node { item, subtasks })
+        })
+        .collect()
+}
+
+/// `show --tree` rows: id (indented two spaces per level), status, title.
+fn tree_rows(item: &Item, subtasks: &[Node], depth: usize, rows: &mut Vec<Vec<String>>) {
+    let indented = format!("{}{}", "  ".repeat(depth), item.id);
+    rows.push(line_row(&indented, &item.status, &item.title));
+    for node in subtasks {
+        let children = node.subtasks.as_deref().unwrap_or_default();
+        tree_rows(&node.item, children, depth + 1, rows);
+    }
 }
 
 /// One item by row id.
@@ -679,6 +770,27 @@ fn snapshot(conn: &Connection, id: i64) -> Result<Snapshot> {
         item: get(conn, id)?,
         attrs: attr::stored_values(conn, id)?,
     })
+}
+
+/// After a mutation: bump the task's `updated_at` if anything a reader sees changed (fields,
+/// attributes, tags) since `before`, and return the verb for the text line. A no-op edit is
+/// not an error, but it leaves the task as it was, timestamp included.
+fn touch_if_changed(conn: &Connection, before: &Snapshot) -> Result<&'static str> {
+    let id = before.item.row_id;
+    let after = snapshot(conn, id)?;
+    let same = before.attrs == after.attrs
+        && serde_json::to_value(&before.item)? == serde_json::to_value(&after.item)?;
+    if same {
+        return Ok("unchanged");
+    }
+    conn.execute(
+        &format!(
+            "UPDATE items SET updated_at = {} WHERE id = ?1",
+            db::NOW_SQL
+        ),
+        params![id],
+    )?;
+    Ok("updated")
 }
 
 /// Record a `changed` event for every built-in field and an `attr` event for every custom

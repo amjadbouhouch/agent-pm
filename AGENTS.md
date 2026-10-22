@@ -39,6 +39,7 @@ src/cmd/<group>.rs one module per command group: its clap args, its `run`, and
 src/db.rs          db path, schema migrations, shared lookups (project_id, item KEY-N)
 src/model.rs       Status, Priority, name=value parsing, date check
 src/output.rs      JSON printing, errors, text tables
+src/input.rs       long text from stdin or a file (bodies, comments): UTF-8, BOM, no tty
 tests/             integration tests (run the real binary on a temp DB)
 install.sh         installer for release binaries (POSIX sh)
 scripts/           version-updater.cjs for commit-and-tag-version
@@ -59,7 +60,8 @@ scripts/           version-updater.cjs for commit-and-tag-version
   Timestamps are UTC ISO text written by SQLite defaults; set `updated_at` on every update.
 - Actor: `--as` > `$APM_AGENT` > OS user. Stored as `created_by` and comment author.
 - Writes return the written object: under `--json` the full object, otherwise one line
-  (`created APM-3`).
+  (`created APM-3`). A write that changes nothing (same values, an absent tag) is not an
+  error: it leaves `updated_at` and history alone and prints `unchanged APM-3`.
 - Tests: every command gets integration tests in `tests/<group>.rs` using `tests/common`
   (`Env::new()`, `env.json(&[...])`, `env.json_err(&[...])`). Test behaviour through the CLI,
   JSON output first. Pure helpers get unit tests next to them.

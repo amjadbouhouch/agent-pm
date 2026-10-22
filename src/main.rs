@@ -2,6 +2,7 @@ mod cli;
 mod cmd;
 mod db;
 mod error;
+mod input;
 mod model;
 mod output;
 
