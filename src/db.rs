@@ -1,8 +1,11 @@
 //! The SQLite file: where it lives, its schema, and the lookups every command group shares.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{
+    Connection, ErrorCode, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 
 use crate::error::{AppError, Result, err};
 
@@ -33,11 +36,32 @@ pub fn open(path: &Path) -> Result<Connection> {
     let mut conn = Connection::open(path)?;
     // WAL + busy timeout: several agents may write at once.
     // The timeout first: switching to WAL and migrating both wait for other writers.
-    conn.busy_timeout(std::time::Duration::from_secs(5))?;
-    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    enable_wal(&conn)?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     migrate(&mut conn)?;
     Ok(conn)
+}
+
+/// Switch to WAL (a no-op once the file is WAL; the mode persists). On a new or
+/// rollback-journal file the switch needs an exclusive lock, and SQLite fails at once with
+/// "database is locked" instead of waiting (busy_timeout does not cover it) when another
+/// process opening the same file holds a lock. Retry that for up to about 2 seconds.
+fn enable_wal(conn: &Connection) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut pause = Duration::from_millis(5);
+    loop {
+        match conn.pragma_update(None, "journal_mode", "WAL") {
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if matches!(e.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(pause);
+                pause = (pause * 2).min(Duration::from_millis(100));
+            }
+            res => return Ok(res?),
+        }
+    }
 }
 
 /// Schema migrations, applied in order. `PRAGMA user_version` = number applied.
