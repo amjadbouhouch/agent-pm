@@ -328,8 +328,9 @@ pub fn write_tx(conn: &Connection) -> Result<Transaction<'_>> {
     )?)
 }
 
-/// What a history event records; stored as `events.kind`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What a history event records; stored as `events.kind`. `ValueEnum` lists every variant, so
+/// import's validation can't drift from the enum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum EventKind {
     /// The task was created; new = title.
     Created,
@@ -359,6 +360,14 @@ pub enum EventKind {
 }
 
 impl EventKind {
+    /// The kind stored as `s`, if apm knows it (used to validate imported history).
+    pub fn parse(s: &str) -> Option<EventKind> {
+        <EventKind as clap::ValueEnum>::value_variants()
+            .iter()
+            .copied()
+            .find(|k| k.as_str() == s)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             EventKind::Created => "created",
@@ -540,6 +549,16 @@ pub fn item(conn: &Connection, reference: &str) -> Result<ItemRef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn event_kinds_parse_back_from_their_stored_names() {
+        use clap::ValueEnum;
+        for kind in EventKind::value_variants() {
+            assert_eq!(EventKind::parse(kind.as_str()), Some(*kind));
+        }
+        assert_eq!(EventKind::parse("bogus"), None);
+        assert_eq!(EventKind::parse(""), None);
+    }
 
     #[test]
     fn item_keys() {

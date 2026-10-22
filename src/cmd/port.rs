@@ -672,8 +672,8 @@ fn check(data: &mut Export) -> Result<()> {
                 check_time(&c.created_at).map_err(at)?;
             }
             for e in &t.events {
-                if e.kind.is_empty() {
-                    return Err(at(err("event without a kind")));
+                if db::EventKind::parse(&e.kind).is_none() {
+                    return Err(at(err(format!("unknown event kind: {}", e.kind))));
                 }
                 check_time(&e.at).map_err(at)?;
             }

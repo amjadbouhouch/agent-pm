@@ -68,7 +68,7 @@ scripts/           version-updater.cjs for commit-and-tag-version
 - History: every task mutation records events with `db::record_event` inside its write
   transaction (`db::write_tx`), one per real change (diff before/after, no-ops record
   nothing). Pick an `EventKind`; a new kind is appended to the enum with a doc comment saying
-  what `field`/`old`/`new` hold. Values are stored as displayed (status name, KEY-N).
+  what `field`/`old`/`new` hold (import accepts exactly the enum's kinds). Values are stored as displayed (status name, KEY-N).
 - Text matching: SQLite's `lower`/`LIKE` fold ASCII only; use the `fold(text)` SQL function
   (registered in `db.rs`) for case-insensitive matching of user text.
 - Text output is ASCII (`->`, `...`); user data is printed as given.
@@ -111,7 +111,8 @@ Unknown fields are rejected. Field order is fixed, so the same data exports to t
 ```
 
 Values are as stored (`yes` is `"true"`, dates in UTC). Import re-validates everything as the
-commands would, keeps `KEY-N`, timestamps and actors, and writes in one transaction.
+commands would (event kinds must be known `EventKind`s), keeps `KEY-N`, timestamps and actors,
+and writes in one transaction; imported tasks start unclaimed.
 
 ## Workflow
 
