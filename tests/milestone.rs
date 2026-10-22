@@ -427,3 +427,20 @@ fn progress_counts_leaf_tasks_only() {
         4
     );
 }
+
+#[test]
+fn progress_skips_a_parent_with_deeper_subtasks_in_the_milestone() {
+    let env = Env::new();
+    project(&env, "APM");
+    env.json(&["milestone", "add", "v1", "-p", "APM"]);
+    // R (v1) > Rc (no milestone) > Rg (v1): only Rg is a unit of v1.
+    task(&env, "R", "todo", Some("v1"));
+    env.json(&["add", "Rc", "--parent", "APM-1"]);
+    env.json(&[
+        "add", "Rg", "--parent", "APM-2", "-m", "v1", "--status", "done",
+    ]);
+    assert_eq!(
+        env.json(&["milestone", "show", "v1", "-p", "APM"])["progress"],
+        serde_json::json!({"total": 1, "done": 1, "cancelled": 0})
+    );
+}

@@ -14,7 +14,7 @@ use super::{Ctx, attr, comment, link, milestone, tag};
 use crate::db::{self, EventKind};
 use crate::error::{Result, err};
 use crate::model::{Category, Priority, When, normalize_when, parse_pair, parse_when};
-use crate::output;
+use crate::{input, output};
 
 #[derive(Args, Debug)]
 pub struct KeyArg {
@@ -26,7 +26,8 @@ pub struct KeyArg {
 pub struct ShowArgs {
     /// Task id, e.g. APM-12
     pub key: String,
-    /// Only the task and all its subtasks, as an indented tree (JSON: nested `subtasks`)
+    /// Print only the task and all its subtasks, as an indented tree (no fields or comments);
+    /// with --json, the full object with `subtasks` nested at every level
     #[arg(long)]
     pub tree: bool,
 }
@@ -227,7 +228,7 @@ const SELECT: &str = "
 
 pub fn add(ctx: &Ctx, mut args: AddArgs) -> Result<()> {
     check_title(&args.title)?;
-    args.body = super::read_text(args.body.take(), args.body_file.as_deref())?;
+    args.body = input::read_text(args.body.take(), args.body_file.as_deref(), &input::BODY)?;
     let tx = db::write_tx(&ctx.conn)?;
     let parent = args
         .parent
@@ -470,7 +471,7 @@ pub fn show(ctx: &Ctx, args: ShowArgs) -> Result<()> {
             println!("\n{label}:");
             let rows: Vec<Vec<String>> = linked
                 .iter()
-                .map(|l| vec![l.id.clone(), l.status.clone(), l.title.clone()])
+                .map(|l| line_row(&l.id, &l.status, &l.title))
                 .collect();
             print_indented(&rows);
         }
@@ -480,13 +481,7 @@ pub fn show(ctx: &Ctx, args: ShowArgs) -> Result<()> {
         let rows: Vec<Vec<String>> = detail
             .subtasks
             .iter()
-            .map(|s| {
-                vec![
-                    s.item.id.clone(),
-                    s.item.status.clone(),
-                    s.item.title.clone(),
-                ]
-            })
+            .map(|s| line_row(&s.item.id, &s.item.status, &s.item.title))
             .collect();
         print_indented(&rows);
     }
@@ -500,7 +495,7 @@ pub fn show(ctx: &Ctx, args: ShowArgs) -> Result<()> {
 }
 
 pub fn edit(ctx: &Ctx, mut args: EditArgs) -> Result<()> {
-    args.body = super::read_text(args.body.take(), args.body_file.as_deref())?;
+    args.body = input::read_text(args.body.take(), args.body_file.as_deref(), &input::BODY)?;
     let tx = db::write_tx(&ctx.conn)?;
     let item = db::item(&tx, &args.key)?;
     let nothing = args.title.is_none()
@@ -650,6 +645,11 @@ pub fn rm(ctx: &Ctx, args: KeyArg) -> Result<()> {
     output::written(ctx.json, &item, &line)
 }
 
+/// A task as one line of `show`: id, status, title.
+fn line_row(id: &str, status: &str, title: &str) -> Vec<String> {
+    vec![id.to_string(), status.to_string(), title.to_string()]
+}
+
 /// Rows printed as aligned columns, indented by two spaces.
 fn print_indented(rows: &[Vec<String>]) {
     for line in output::aligned(rows) {
@@ -670,11 +670,8 @@ fn subtree(conn: &Connection, id: i64) -> Result<Vec<Node>> {
 
 /// `show --tree` rows: id (indented two spaces per level), status, title.
 fn tree_rows(item: &Item, subtasks: &[Node], depth: usize, rows: &mut Vec<Vec<String>>) {
-    rows.push(vec![
-        format!("{}{}", "  ".repeat(depth), item.id),
-        item.status.clone(),
-        item.title.clone(),
-    ]);
+    let indented = format!("{}{}", "  ".repeat(depth), item.id);
+    rows.push(line_row(&indented, &item.status, &item.title));
     for node in subtasks {
         let children = node.subtasks.as_deref().unwrap_or_default();
         tree_rows(&node.item, children, depth + 1, rows);

@@ -7,16 +7,20 @@ use serde::Serialize;
 use super::Ctx;
 use crate::db::{self, EventKind};
 use crate::error::{Result, err};
-use crate::output;
+use crate::{input, output};
 
 #[derive(Args, Debug)]
 pub struct CommentArgs {
     /// Task id, e.g. APM-12
     pub key: String,
-    /// The comment, Markdown by convention; `-` reads stdin
-    #[arg(required_unless_present = "file", conflicts_with = "file")]
+    /// The comment, Markdown by convention; `-` reads it from stdin (or use --file)
+    #[arg(
+        value_name = "TEXT|-",
+        required_unless_present = "file",
+        conflicts_with = "file"
+    )]
     pub text: Option<String>,
-    /// Read the comment from a file
+    /// Read the comment from a file instead
     #[arg(long, value_name = "PATH")]
     pub file: Option<PathBuf>,
 }
@@ -48,7 +52,8 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Comment> {
 
 /// `apm comment KEY-N <text>`: add a comment authored by the actor.
 pub fn run(ctx: &Ctx, args: CommentArgs) -> Result<()> {
-    let text = super::read_text(args.text, args.file.as_deref())?.unwrap_or_default();
+    let text =
+        input::read_text(args.text, args.file.as_deref(), &input::COMMENT)?.unwrap_or_default();
     if text.trim().is_empty() {
         return Err(err("comment text cannot be empty"));
     }

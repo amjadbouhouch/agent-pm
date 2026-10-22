@@ -791,3 +791,66 @@ fn real_changes_still_bump_updated_at() {
         "updated APM-1\n"
     );
 }
+
+#[test]
+fn read_bodies_are_utf8_and_not_empty() {
+    let env = env_apm();
+    env.json(&["add", "t", "-p", "APM", "-b", "keep"]);
+    let dir = env.dir.path();
+    // A BOM (Notepad, PowerShell 7 utf8BOM) is dropped.
+    let bom = dir.join("bom.md");
+    std::fs::write(&bom, b"\xef\xbb\xbf# Title\n").unwrap();
+    let bom = bom.to_str().unwrap();
+    assert_eq!(
+        env.json(&["edit", "APM-1", "--body-file", bom])["body"],
+        "# Title"
+    );
+    assert_eq!(
+        env.json_stdin(&["edit", "APM-1", "-b", "-"], "\u{feff}piped")["body"],
+        "piped"
+    );
+    // UTF-16 (Windows PowerShell 5.1 `>`) is refused, naming the file.
+    let utf16 = dir.join("utf16.md");
+    std::fs::write(&utf16, [0xff, 0xfe, b'h', 0, b'i', 0]).unwrap();
+    let utf16 = utf16.to_str().unwrap();
+    assert_eq!(
+        env.json_err(&["edit", "APM-1", "--body-file", utf16]),
+        format!("file is not UTF-8 text: {utf16}")
+    );
+    let out = env
+        .apm()
+        .args(["--json", "edit", "APM-1", "-b", "-"])
+        .write_stdin(vec![0xffu8, 0xfe, b'h', 0])
+        .assert()
+        .code(1);
+    let v: Value = serde_json::from_slice(&out.get_output().stderr).unwrap();
+    assert_eq!(v["error"], "stdin is not UTF-8 text");
+    // Empty read text doesn't silently clear the body.
+    let empty = dir.join("empty.md");
+    std::fs::write(&empty, "\n\n").unwrap();
+    let empty = empty.to_str().unwrap();
+    let msg = "body is empty; to clear a body use edit --unset body";
+    assert_eq!(env.json_err(&["edit", "APM-1", "--body-file", empty]), msg);
+    assert_eq!(
+        env.json_err(&["add", "u", "-p", "APM", "--body-file", empty]),
+        msg
+    );
+    let out = env
+        .apm()
+        .args(["--json", "edit", "APM-1", "-b", "-"])
+        .write_stdin("  \n")
+        .assert()
+        .code(1);
+    let v: Value = serde_json::from_slice(&out.get_output().stderr).unwrap();
+    assert_eq!(v["error"], msg);
+    assert_eq!(env.json(&["show", "APM-1"])["body"], "piped");
+}
+
+#[test]
+fn help_shows_the_stdin_forms() {
+    let env = env_apm();
+    let out = env.apm().args(["comment", "--help"]).assert().success();
+    let help = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(help.contains("[TEXT|-]"), "{help}");
+    assert!(help.contains("--file <PATH>"), "{help}");
+}
