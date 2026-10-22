@@ -1,13 +1,16 @@
 # apm (agent-pm) installer for Windows.
 #
 #   irm https://raw.githubusercontent.com/amjadbouhouch/agent-pm/main/install.ps1 | iex
+#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/amjadbouhouch/agent-pm/main/install.ps1))) -Version v0.3.0
 #
 # Installs a single self-contained binary. Re-running upgrades in place.
 # Environment variables and parameters: see Show-Usage below, or run with -Help.
 #
 # Runs on Windows PowerShell 5.1 and PowerShell 7. Under `irm | iex` there is no
 # file and no parameter binding, so every parameter also has an environment
-# variable, and the script never calls `exit` there (it would close the shell).
+# variable. Only a run of this file itself ends with `exit 1` on failure; run
+# from text (iex, a scriptblock) it throws instead, because `exit` there would
+# close the user's shell or end the script that called it.
 # ASCII only: PowerShell 5.1 reads a script without a BOM in the ANSI code page.
 
 param(
@@ -22,12 +25,23 @@ param(
   [switch]$Help
 )
 
+# Everything runs inside this scriptblock, so under `irm | iex` none of its
+# functions or variables are left behind in the user's session.
+& {
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = 'Stop'
+
+# The file this code was parsed from: install.ps1 when it runs as a file,
+# empty when it runs from text (iex, [scriptblock]::Create).
+$scriptFile = {}.File
+
 # Printed by -Help. Not read from this file: under `irm | iex` there is no file.
 function Show-Usage {
   Say @'
 apm (agent-pm) installer for Windows.
 
   irm https://raw.githubusercontent.com/amjadbouhouch/agent-pm/main/install.ps1 | iex
+  & ([scriptblock]::Create((irm <same url>))) -Version v0.3.0
   .\install.ps1 -Version v0.3.0
 
 Installs a single self-contained binary. Re-running upgrades in place.
@@ -40,7 +54,7 @@ Environment:
   APM_BASE_URL     download from a mirror (URL or local folder) instead of GitHub releases
   APM_MODIFY_PATH  yes/no: edit the user PATH without asking (default: ask)
 
-Parameters:
+Parameters (they win over the environment):
   -Local            build from the current source tree instead of downloading
   -Uninstall        remove apm.exe and its PATH entry (your database in ~\.agent-pm is kept)
   -Version X        install a specific version
@@ -51,10 +65,6 @@ Parameters:
   -NoModifyPath     never touch the user PATH
 '@
 }
-
-# Thrown by Fail after it has printed the message, so the caller can tell a
-# reported failure from an unexpected one.
-$FailMarker = 'apm-install-failed'
 
 # "<tag> <msg>" with the tag coloured, only when the stream is a console, so
 # redirected output stays clean. Warnings and errors go to stderr.
@@ -79,10 +89,8 @@ function Say($msg) { Write-Host $msg }
 function Info($msg) { Say "  $msg" }
 function Warn($msg) { Write-Tagged '!' $msg Yellow -Stderr }
 function Ok($msg) { Write-Tagged 'ok' $msg Green }
-function Fail($msg) {
-  Write-Tagged 'error' $msg Red -Stderr
-  throw $FailMarker
-}
+# Stops the install; the message is printed once, where the run ends.
+function Fail($msg) { throw $msg }
 
 # ---------------------------------------------------------------------- PATH
 # The user PATH is read and written in the registry directly: going through
@@ -184,62 +192,85 @@ function Get-ApmVersion($exe) {
   $null
 }
 
-# A URL is downloaded; a folder (or file:// URL) is copied from, for mirrors
-# on a share and for the tests.
+# $true when fetched, $false when the source has no such file (HTTP 404, or
+# not in the folder). Anything else (network, server errors) stops the
+# install rather than silently skipping a file. A folder (or file:// URL) is
+# copied from, for mirrors on a share and for the tests.
 function Get-Asset($base, $name, $dest) {
-  if ($base -match '^https?://') {
-    for ($try = 1; ; $try++) {
-      try {
-        Invoke-WebRequest -Uri "$base/$name" -OutFile $dest -UseBasicParsing
-        return $true
-      } catch {
-        if ($try -ge 3) { return $false }
+  if ($base -notmatch '^https?://') {
+    $src = Join-Path $base $name
+    if (-not (Test-Path -LiteralPath $src -PathType Leaf)) { return $false }
+    Copy-Item -LiteralPath $src -Destination $dest -Force
+    return $true
+  }
+  $url = "$base/$name"
+  for ($try = 1; ; $try++) {
+    # WebClient, not Invoke-WebRequest: 5.1's -OutFile reads [ ] in a path
+    # as a wildcard.
+    $client = New-Object Net.WebClient
+    try {
+      $client.DownloadFile($url, $dest)
+      return $true
+    } catch {
+      $e = $_.Exception
+      if ($e.InnerException) { $e = $e.InnerException }
+      if ($e -is [Net.WebException] -and $e.Response -and [int]$e.Response.StatusCode -eq 404) {
+        return $false
       }
+      if ($try -ge 3) { Fail "cannot download $url`: $($e.Message)" }
+      Start-Sleep -Seconds $try
+    } finally {
+      $client.Dispose()
     }
   }
-  $src = Join-Path $base $name
-  if (-not (Test-Path -LiteralPath $src -PathType Leaf)) { return $false }
-  Copy-Item -LiteralPath $src -Destination $dest -Force
-  $true
 }
 
-# Copies left by earlier upgrades whose apm was still running; gone once it exits.
+# Windows cannot delete or overwrite a running .exe, but it can rename one.
+# So a binary is first moved aside to "<name>.old-<pid>", then deleted; one
+# still running stays there until a later run removes it. A file that cannot
+# even be renamed is held open by something else.
+function Move-Aside($path) {
+  $old = "$path.old-$PID"
+  try { [IO.File]::Move($path, $old) } catch {
+    Fail "$path is held open by another program. Close it, then re-run."
+  }
+  $old
+}
+
+# $true when deleted; $false while apm.exe is still running from it.
+function Remove-Aside($old) {
+  Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue
+  -not (Test-Path -LiteralPath $old)
+}
+
+# Copies left by earlier runs whose apm was still running; gone once it exits.
 function Remove-OldCopies($target) {
-  Get-ChildItem -Path "$target.old-*" -ErrorAction SilentlyContinue |
+  $dir = Split-Path -Parent $target
+  if (-not (Test-Path -LiteralPath $dir)) { return }
+  Get-ChildItem -LiteralPath $dir -Filter "$(Split-Path -Leaf $target).old-*" |
     Remove-Item -Force -ErrorAction SilentlyContinue
 }
 
 # Two renames on one volume, so a concurrent `apm` never sees a half-written
-# binary. Windows cannot delete or overwrite a running .exe but can rename it:
-# the old one moves aside and is deleted now, or by the next run if it is
-# still running. A file that cannot even be renamed is held open by something.
+# binary: it runs either the old one or the new one.
 function Move-Into($staged, $target) {
   Remove-OldCopies $target
-  $old = "$target.old-$PID"
-  if (Test-Path -LiteralPath $target) {
-    try { [IO.File]::Move($target, $old) } catch {
-      Fail "cannot replace $target`: another program holds it open. Close it, then re-run."
-    }
-  }
+  $old = $null
+  if (Test-Path -LiteralPath $target) { $old = Move-Aside $target }
   try { [IO.File]::Move($staged, $target) } catch {
-    if (Test-Path -LiteralPath $old) { [IO.File]::Move($old, $target) }
-    Fail "cannot write $target`: $($_.Exception.InnerException.Message)"
-  }
-  if (Test-Path -LiteralPath $old) {
-    Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue
-    if (Test-Path -LiteralPath $old) {
-      Info "the previous apm.exe is still running; the next install removes $old"
+    $reason = $_.Exception.Message
+    if ($old) {
+      try { [IO.File]::Move($old, $target) } catch { Warn "could not restore $target from $old" }
     }
+    Fail "cannot write $target`: $reason"
+  }
+  if ($old -and -not (Remove-Aside $old)) {
+    Info "the previous apm.exe is still running; the next install removes $old"
   }
 }
 
 # ------------------------------------------------------------------ install
 function Install-Apm {
-  Set-StrictMode -Version 2.0
-  $ErrorActionPreference = 'Stop'
-  # Invoke-WebRequest's progress bar slows 5.1 downloads down many times over.
-  $ProgressPreference = 'SilentlyContinue'
-
   if ($Help) { Show-Usage; return }
 
   if ([Environment]::OSVersion.Platform -ne 'Win32NT') {
@@ -252,11 +283,11 @@ function Install-Apm {
   $target = Join-Path $installDir $binName
   $repoName = if ($Repo) { $Repo } else { 'amjadbouhouch/agent-pm' }
   $tag = if ($Version) { $Version } else { 'latest' }
-  # $null = ask when interactive; 'yes'/'no' = decided by parameter or env.
+  # $null = ask when interactive; 'yes'/'no' = decided by parameter, else env.
   $modify = $null
-  if ($env:APM_MODIFY_PATH -in 'yes', 'no') { $modify = $env:APM_MODIFY_PATH }
-  if ($ModifyPath -and $modify -ne 'no') { $modify = 'yes' }
   if ($NoModifyPath) { $modify = 'no' }
+  elseif ($ModifyPath) { $modify = 'yes' }
+  elseif ($env:APM_MODIFY_PATH -in 'yes', 'no') { $modify = $env:APM_MODIFY_PATH }
 
   # -------------------------------------------------------------- uninstall
   # ~\.agent-pm also holds the database (apm.db), so only apm.exe goes, and
@@ -264,17 +295,17 @@ function Install-Apm {
   if ($Uninstall) {
     $removed = $false
     foreach ($candidate in ($target, (Join-Path $defaultDir $binName) | Select-Object -Unique)) {
+      Remove-OldCopies $candidate
       if (Test-Path -LiteralPath $candidate) {
-        try { Remove-Item -LiteralPath $candidate -Force } catch {
-          Fail "cannot remove $candidate`: it is in use. Close every running apm, then re-run."
-        }
+        $old = Move-Aside $candidate
         Info "removed $candidate"
+        if (-not (Remove-Aside $old)) {
+          Info "it is still running: delete $old once it exits"
+        }
         $removed = $true
       }
     }
     if (-not $removed) { Warn 'no installation found' }
-    Remove-OldCopies $target
-    Remove-OldCopies (Join-Path $defaultDir $binName)
     if ($modify -ne 'no') {
       foreach ($d in ($installDir, $defaultDir | Select-Object -Unique)) { Remove-UserPath $d }
     }
@@ -303,8 +334,8 @@ function Install-Apm {
 
   try {
     if ($Local) {
-      $root = $PSScriptRoot
-      if (-not $root -or -not (Test-Path (Join-Path $root 'Cargo.toml'))) {
+      $root = if ($scriptFile) { Split-Path -Parent $scriptFile } else { $null }
+      if (-not $root -or -not (Test-Path -LiteralPath (Join-Path $root 'Cargo.toml'))) {
         Fail '-Local must run from inside the agent-pm source tree: .\install.ps1 -Local'
       }
       if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
@@ -312,7 +343,7 @@ function Install-Apm {
       }
       Info "building from $root"
       # Same command as CI's release build.
-      Push-Location $root
+      Push-Location -LiteralPath $root
       try { & cargo build --release --locked --quiet } finally { Pop-Location }
       if ($LASTEXITCODE -ne 0) { Fail 'cargo build failed' }
       Copy-Item -LiteralPath (Join-Path $root "target\release\$binName") -Destination $staged
@@ -415,11 +446,18 @@ function Install-Apm {
   Say ''
 }
 
-# `exit` only when run as a file: under `irm | iex` it would close the shell.
-$asFile = $MyInvocation.MyCommand.CommandType -eq 'ExternalScript'
 try {
   Install-Apm
 } catch {
-  if ("$_" -ne $FailMarker) { Write-Tagged 'error' "$_" Red -Stderr }
-  if ($asFile) { exit 1 }
+  $msg = $_.Exception.Message
+  # A run of this file: print the error and exit 1, like install.sh.
+  if ($scriptFile) {
+    Write-Tagged 'error' $msg Red -Stderr
+    exit 1
+  }
+  # From text (iex, a scriptblock): a terminating error, which stops the
+  # caller's script (or makes `powershell -Command` exit 1) without closing
+  # an interactive shell.
+  throw "apm install failed: $msg"
+}
 }
