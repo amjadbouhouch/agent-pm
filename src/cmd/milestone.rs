@@ -82,7 +82,8 @@ pub struct Milestone {
 }
 
 /// By status category: `total` counts tasks that are not cancelled; `done` and `cancelled`
-/// count tasks in done- and cancelled-category statuses.
+/// count tasks in done- and cancelled-category statuses. Only units of work count: a task
+/// with subtasks (at any depth) in the same milestone is counted through those, not on its own.
 #[derive(Serialize, Debug)]
 pub struct Progress {
     pub total: i64,
@@ -147,6 +148,13 @@ pub fn load(conn: &Connection, id: i64) -> Result<Milestone> {
          FROM milestones m
          JOIN projects p ON p.id = m.project_id
          LEFT JOIN items i ON i.milestone_id = m.id
+             AND NOT EXISTS (
+                 WITH RECURSIVE down(id) AS (
+                     SELECT c.id FROM items c WHERE c.parent_id = i.id
+                     UNION SELECT c.id FROM items c JOIN down ON c.parent_id = down.id
+                 )
+                 SELECT 1 FROM down JOIN items d ON d.id = down.id WHERE d.milestone_id = m.id
+             )
          LEFT JOIN statuses s ON s.id = i.status_id
          WHERE m.id = ?1
          GROUP BY m.id",

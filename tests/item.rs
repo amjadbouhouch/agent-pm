@@ -264,6 +264,7 @@ fn list_errors() {
 fn list_text_table() {
     let env = env_apm();
     assert_eq!(text(&env, &["list"]), "");
+    seed_milestone(&env, "APM", "v1");
     env.json(&[
         "add",
         "parent",
@@ -273,17 +274,25 @@ fn list_text_table() {
         "alice",
         "--due",
         "2026-11-01",
+        "-m",
+        "v1",
     ]);
     env.json(&["add", "child", "--parent", "APM-1"]);
     let out = text(&env, &["list"]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 3);
     let headers: Vec<&str> = lines[0].split_whitespace().collect();
-    assert_eq!(headers, ["ID", "STATUS", "PRI", "ASSIGNEE", "DUE", "TITLE"]);
+    assert_eq!(
+        headers,
+        ["ID", "STATUS", "PRI", "ASSIGNEE", "DUE", "MS", "TITLE"]
+    );
     assert!(lines[1].starts_with("APM-1  todo"));
     assert!(lines[1].contains("alice"));
-    assert!(lines[1].contains("2026-11-01"));
+    assert!(lines[1].contains("2026-11-01  v1"));
     assert!(lines[1].ends_with("parent"));
+    // No milestone: a dash in the MS column.
+    let cells: Vec<&str> = lines[2].split_whitespace().collect();
+    assert_eq!(cells[5], "-");
     assert!(lines[2].ends_with("APM-1 > child"));
 }
 
@@ -313,6 +322,57 @@ fn show_includes_subtasks_and_comments() {
     assert!(out.contains("\nthe body\n"));
     assert!(out.contains("  APM-2  done  child\n"));
     assert!(out.contains("alice: looks good\n"));
+}
+
+#[test]
+fn show_aligns_subtask_lines() {
+    let env = env_apm();
+    env.json(&["add", "parent", "-p", "APM"]);
+    env.json(&["add", "a", "--parent", "APM-1", "--status", "doing"]);
+    for t in ["b", "c", "d", "e", "f", "g", "h", "i"] {
+        env.json(&["add", t, "-p", "APM"]);
+    }
+    env.json(&["add", "j", "--parent", "APM-1"]);
+    let out = text(&env, &["show", "APM-1"]);
+    let subtasks: Vec<&str> = out
+        .lines()
+        .skip_while(|l| *l != "subtasks:")
+        .skip(1)
+        .collect();
+    assert_eq!(subtasks, ["  APM-2   doing  a", "  APM-11  todo   j"]);
+}
+
+#[test]
+fn show_tree_nests_every_level() {
+    let env = env_apm();
+    env.json(&["add", "root", "-p", "APM"]);
+    env.json(&["add", "a", "--parent", "APM-1", "--status", "doing"]);
+    env.json(&["add", "a1", "--parent", "APM-2"]);
+    env.json(&["add", "b", "--parent", "APM-1", "--status", "done"]);
+    env.json(&["add", "a1x", "--parent", "APM-3"]);
+    assert_eq!(
+        text(&env, &["show", "APM-1", "--tree"]),
+        "APM-1        todo   root\n  APM-2      doing  a\n    APM-3    todo   a1\n      APM-5  todo   a1x\n  APM-4      done   b\n"
+    );
+    let v = env.json(&["show", "APM-1", "--tree"]);
+    assert_eq!(v["id"], "APM-1");
+    assert_eq!(ids(&v["subtasks"]), ["APM-2", "APM-4"]);
+    assert_eq!(ids(&v["subtasks"][0]["subtasks"]), ["APM-3"]);
+    assert_eq!(
+        v["subtasks"][0]["subtasks"][0]["subtasks"][0]["id"],
+        "APM-5"
+    );
+    // Leaves have an empty list; links and comments are there as in plain show.
+    assert_eq!(v["subtasks"][1]["subtasks"], serde_json::json!([]));
+    assert!(v["comments"].is_array());
+    // Without --tree, subtasks are plain items (no nested `subtasks` key).
+    let plain = env.json(&["show", "APM-1"]);
+    assert!(plain["subtasks"][0].get("subtasks").is_none());
+    // A task without subtasks is a one-line tree.
+    assert_eq!(
+        text(&env, &["show", "APM-5", "--tree"]),
+        "APM-5  todo  a1x\n"
+    );
 }
 
 #[test]
@@ -594,4 +654,203 @@ fn concurrent_adds_get_distinct_numbers() {
     all.sort();
     all.dedup();
     assert_eq!(all.len(), 30);
+}
+
+// ---- long text: stdin and files
+
+#[test]
+fn body_from_stdin_or_a_file() {
+    let env = env_apm();
+    let md = "# Plan\n\n- step 1\n- `apm add \"x\" -p APM`\n";
+    let i = env.json_stdin(&["add", "t", "-p", "APM", "-b", "-"], md);
+    // Stored verbatim, minus the trailing newline.
+    assert_eq!(i["body"], "# Plan\n\n- step 1\n- `apm add \"x\" -p APM`");
+    let i = env.json_stdin(&["edit", "APM-1", "-b", "-"], "  indented\nsecond\n\n");
+    assert_eq!(i["body"], "  indented\nsecond");
+    let path = env.dir.path().join("body.md");
+    std::fs::write(&path, "from a file\r\n").unwrap();
+    let path = path.to_str().unwrap();
+    assert_eq!(
+        env.json(&["edit", "APM-1", "--body-file", path])["body"],
+        "from a file"
+    );
+    assert_eq!(
+        env.json(&["add", "u", "-p", "APM", "--body-file", path])["body"],
+        "from a file"
+    );
+    // Inline text is kept exactly, trailing newline included.
+    assert_eq!(
+        env.json(&["edit", "APM-1", "-b", "inline\n"])["body"],
+        "inline\n"
+    );
+}
+
+#[test]
+fn body_input_errors() {
+    let env = env_apm();
+    env.apm()
+        .args([
+            "--json",
+            "add",
+            "t",
+            "-p",
+            "APM",
+            "-b",
+            "x",
+            "--body-file",
+            "f.md",
+        ])
+        .assert()
+        .code(2);
+    let missing = env.dir.path().join("missing.md");
+    let missing = missing.to_str().unwrap();
+    assert!(
+        env.json_err(&["add", "t", "-p", "APM", "--body-file", missing])
+            .starts_with(&format!("cannot read {missing}: "))
+    );
+    assert_eq!(env.json(&["list", "--all"]), serde_json::json!([]));
+    env.json(&["add", "t", "-p", "APM"]);
+    let out = env
+        .apm()
+        .args(["--json", "edit", "APM-1", "-b", "-", "--unset", "body"])
+        .write_stdin("x")
+        .assert()
+        .failure();
+    let v: Value = serde_json::from_slice(&out.get_output().stderr).unwrap();
+    assert_eq!(v["error"], "cannot both set and unset body");
+}
+
+// ---- no-op edits
+
+/// Set every task's updated_at to a fixed past time, so a bump is visible.
+fn age(env: &Env) {
+    env.conn()
+        .execute("UPDATE items SET updated_at = '2000-01-01T00:00:00Z'", [])
+        .unwrap();
+}
+
+#[test]
+fn edits_that_change_nothing_leave_updated_at() {
+    let env = env_apm();
+    env.json(&["attr", "add", "points", "-p", "APM", "--type", "number"]);
+    env.json(&[
+        "add", "t", "-p", "APM", "-a", "ann", "--set", "points=2", "--tag", "ui",
+    ]);
+    env.json(&["start", "APM-1"]);
+    age(&env);
+    let noops: [&[&str]; 7] = [
+        &["edit", "APM-1", "--title", "t"],
+        &["edit", "APM-1", "--status", "DOING", "-a", "ann"],
+        &["edit", "APM-1", "--set", "points=2.0"],
+        &["edit", "APM-1", "--untag", "absent", "--tag", "ui"],
+        &["edit", "APM-1", "--unset", "due", "--unset", "milestone"],
+        &["edit", "APM-1", "--unset", "body"],
+        &["start", "APM-1"],
+    ];
+    for args in noops {
+        let v = env.json(args);
+        assert_eq!(v["id"], "APM-1", "{args:?}");
+        assert_eq!(v["updated_at"], "2000-01-01T00:00:00Z", "{args:?}");
+    }
+    assert_eq!(
+        text(&env, &["edit", "APM-1", "--untag", "absent"]),
+        "unchanged APM-1\n"
+    );
+    assert_eq!(text(&env, &["start", "APM-1"]), "unchanged APM-1 (doing)\n");
+    // Nothing recorded either: created, started, tagged at creation only.
+    let events: i64 = env
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM events WHERE kind != 'tagged'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(events, 2);
+}
+
+#[test]
+fn real_changes_still_bump_updated_at() {
+    let env = env_apm();
+    env.json(&["attr", "add", "points", "-p", "APM", "--type", "number"]);
+    env.json(&["add", "t", "-p", "APM"]);
+    let changes: [&[&str]; 4] = [
+        &["edit", "APM-1", "--tag", "ui"],
+        &["edit", "APM-1", "--set", "points=3"],
+        &["edit", "APM-1", "--unset", "points"],
+        &["done", "APM-1"],
+    ];
+    for args in changes {
+        age(&env);
+        let v = env.json(args);
+        assert_ne!(v["updated_at"], "2000-01-01T00:00:00Z", "{args:?}");
+    }
+    age(&env);
+    assert_eq!(
+        text(&env, &["edit", "APM-1", "--title", "new"]),
+        "updated APM-1\n"
+    );
+}
+
+#[test]
+fn read_bodies_are_utf8_and_not_empty() {
+    let env = env_apm();
+    env.json(&["add", "t", "-p", "APM", "-b", "keep"]);
+    let dir = env.dir.path();
+    // A BOM (Notepad, PowerShell 7 utf8BOM) is dropped.
+    let bom = dir.join("bom.md");
+    std::fs::write(&bom, b"\xef\xbb\xbf# Title\n").unwrap();
+    let bom = bom.to_str().unwrap();
+    assert_eq!(
+        env.json(&["edit", "APM-1", "--body-file", bom])["body"],
+        "# Title"
+    );
+    assert_eq!(
+        env.json_stdin(&["edit", "APM-1", "-b", "-"], "\u{feff}piped")["body"],
+        "piped"
+    );
+    // UTF-16 (Windows PowerShell 5.1 `>`) is refused, naming the file.
+    let utf16 = dir.join("utf16.md");
+    std::fs::write(&utf16, [0xff, 0xfe, b'h', 0, b'i', 0]).unwrap();
+    let utf16 = utf16.to_str().unwrap();
+    assert_eq!(
+        env.json_err(&["edit", "APM-1", "--body-file", utf16]),
+        format!("file is not UTF-8 text: {utf16}")
+    );
+    let out = env
+        .apm()
+        .args(["--json", "edit", "APM-1", "-b", "-"])
+        .write_stdin(vec![0xffu8, 0xfe, b'h', 0])
+        .assert()
+        .code(1);
+    let v: Value = serde_json::from_slice(&out.get_output().stderr).unwrap();
+    assert_eq!(v["error"], "stdin is not UTF-8 text");
+    // Empty read text doesn't silently clear the body.
+    let empty = dir.join("empty.md");
+    std::fs::write(&empty, "\n\n").unwrap();
+    let empty = empty.to_str().unwrap();
+    let msg = "body is empty; to clear a body use edit --unset body";
+    assert_eq!(env.json_err(&["edit", "APM-1", "--body-file", empty]), msg);
+    assert_eq!(
+        env.json_err(&["add", "u", "-p", "APM", "--body-file", empty]),
+        msg
+    );
+    let out = env
+        .apm()
+        .args(["--json", "edit", "APM-1", "-b", "-"])
+        .write_stdin("  \n")
+        .assert()
+        .code(1);
+    let v: Value = serde_json::from_slice(&out.get_output().stderr).unwrap();
+    assert_eq!(v["error"], msg);
+    assert_eq!(env.json(&["show", "APM-1"])["body"], "piped");
+}
+
+#[test]
+fn help_shows_the_stdin_forms() {
+    let env = env_apm();
+    let out = env.apm().args(["comment", "--help"]).assert().success();
+    let help = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(help.contains("[TEXT|-]"), "{help}");
+    assert!(help.contains("--file <PATH>"), "{help}");
 }

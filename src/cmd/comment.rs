@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::Args;
 use rusqlite::{Connection, params};
 use serde::Serialize;
@@ -5,13 +7,22 @@ use serde::Serialize;
 use super::Ctx;
 use crate::db::{self, EventKind};
 use crate::error::{Result, err};
-use crate::output;
+use crate::{input, output};
 
 #[derive(Args, Debug)]
 pub struct CommentArgs {
     /// Task id, e.g. APM-12
     pub key: String,
-    pub text: String,
+    /// The comment, Markdown by convention; `-` reads it from stdin (or use --file)
+    #[arg(
+        value_name = "TEXT|-",
+        required_unless_present = "file",
+        conflicts_with = "file"
+    )]
+    pub text: Option<String>,
+    /// Read the comment from a file instead
+    #[arg(long, value_name = "PATH")]
+    pub file: Option<PathBuf>,
 }
 
 #[derive(Serialize, Debug)]
@@ -41,7 +52,9 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Comment> {
 
 /// `apm comment KEY-N <text>`: add a comment authored by the actor.
 pub fn run(ctx: &Ctx, args: CommentArgs) -> Result<()> {
-    if args.text.trim().is_empty() {
+    let text =
+        input::read_text(args.text, args.file.as_deref(), &input::COMMENT)?.unwrap_or_default();
+    if text.trim().is_empty() {
         return Err(err("comment text cannot be empty"));
     }
     // A comment is activity on the task: bump its updated_at in the same transaction.
@@ -49,7 +62,7 @@ pub fn run(ctx: &Ctx, args: CommentArgs) -> Result<()> {
     let item = db::item(&tx, &args.key)?;
     tx.execute(
         "INSERT INTO comments (item_id, author, body) VALUES (?1, ?2, ?3)",
-        params![item.id, ctx.actor, args.text],
+        params![item.id, ctx.actor, text],
     )?;
     let id = tx.last_insert_rowid();
     db::record_event(
@@ -59,7 +72,7 @@ pub fn run(ctx: &Ctx, args: CommentArgs) -> Result<()> {
         EventKind::Commented,
         None,
         None,
-        Some(&args.text),
+        Some(&text),
     )?;
     tx.execute(
         &format!(

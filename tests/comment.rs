@@ -88,3 +88,53 @@ fn comment_bumps_item_updated_at() {
         .unwrap();
     assert_ne!(updated, "2000-01-01T00:00:00Z");
 }
+
+#[test]
+fn comment_from_stdin_or_a_file() {
+    let env = Env::new();
+    seed(&env);
+    let v = env.json_stdin(&["comment", "APM-1", "-"], "**done**\n\n- tests pass\n");
+    assert_eq!(v["body"], "**done**\n\n- tests pass");
+    let path = env.dir.path().join("note.md");
+    std::fs::write(&path, "from a file\n").unwrap();
+    let v = env.json(&["comment", "APM-1", "--file", path.to_str().unwrap()]);
+    assert_eq!(v["body"], "from a file");
+    let bodies: Vec<serde_json::Value> = env.json(&["show", "APM-1"])["comments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["body"].clone())
+        .collect();
+    assert_eq!(bodies, ["**done**\n\n- tests pass", "from a file"]);
+}
+
+#[test]
+fn comment_input_errors() {
+    let env = Env::new();
+    seed(&env);
+    // Neither text nor --file, or both: usage errors.
+    env.apm()
+        .args(["--json", "comment", "APM-1"])
+        .assert()
+        .code(2);
+    env.apm()
+        .args(["--json", "comment", "APM-1", "x", "--file", "f.md"])
+        .assert()
+        .code(2);
+    let out = env
+        .apm()
+        .args(["--json", "comment", "APM-1", "-"])
+        .write_stdin("\n\n")
+        .assert()
+        .code(1);
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stderr).unwrap();
+    assert_eq!(v["error"], "comment text cannot be empty");
+    assert!(
+        env.json_err(&["comment", "APM-1", "--file", "no/such.md"])
+            .starts_with("cannot read no/such.md: ")
+    );
+    assert_eq!(
+        env.json(&["show", "APM-1"])["comments"],
+        serde_json::json!([])
+    );
+}
