@@ -2,17 +2,19 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
+use std::hash::Hash;
 
 use clap::{Args, ValueEnum};
 use rusqlite::{Connection, OptionalExtension, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::Ctx;
 use crate::db::{self, EventKind};
 use crate::error::{Result, err};
 use crate::output;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum LinkKind {
     Blocks,
     Relates,
@@ -243,14 +245,34 @@ fn find(conn: &Connection, from: i64, kind: LinkKind, to: i64) -> Result<Option<
 fn check_cycle(conn: &Connection, from: i64, to: i64) -> Result<()> {
     let mut stmt =
         conn.prepare("SELECT to_id FROM links WHERE from_id = ?1 AND kind = 'blocks'")?;
+    let cycle = blocks_cycle(from, to, |id| {
+        Ok(stmt
+            .query_map(params![id], |r| r.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    })?;
+    if let Some(path) = cycle {
+        let keys = path
+            .iter()
+            .map(|&p| db::current_key(conn, p))
+            .collect::<Result<Vec<_>>>()?;
+        return Err(err(format!("blocks cycle: {}", keys.join(" blocks "))));
+    }
+    Ok(())
+}
+
+/// The loop that `from blocks to` would close, as the path `from, to, ..., from`, when `to`
+/// already (transitively) blocks `from`. `blocked(id)` lists the tasks `id` blocks. Used by
+/// `link` (over the database) and `import` (over the file).
+pub fn blocks_cycle<K: Copy + Eq + Hash>(
+    from: K,
+    to: K,
+    mut blocked: impl FnMut(K) -> Result<Vec<K>>,
+) -> Result<Option<Vec<K>>> {
     // Breadth-first from `to`; `prev` remembers how each task was reached.
-    let mut prev: HashMap<i64, i64> = HashMap::from([(to, from)]);
+    let mut prev: HashMap<K, K> = HashMap::from([(to, from)]);
     let mut queue = VecDeque::from([to]);
     while let Some(id) = queue.pop_front() {
-        let next = stmt
-            .query_map(params![id], |r| r.get::<_, i64>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for n in next {
+        for n in blocked(id)? {
             if n == from {
                 // from -> to -> ... -> id -> from
                 let (mut back, mut at) = (vec![id], id);
@@ -262,11 +284,7 @@ fn check_cycle(conn: &Connection, from: i64, to: i64) -> Result<()> {
                 let mut path = vec![from];
                 path.extend(back.into_iter().rev());
                 path.push(from);
-                let keys = path
-                    .iter()
-                    .map(|&p| db::current_key(conn, p))
-                    .collect::<Result<Vec<_>>>()?;
-                return Err(err(format!("blocks cycle: {}", keys.join(" blocks "))));
+                return Ok(Some(path));
             }
             if let Entry::Vacant(e) = prev.entry(n) {
                 e.insert(id);
@@ -274,7 +292,7 @@ fn check_cycle(conn: &Connection, from: i64, to: i64) -> Result<()> {
             }
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// One `linked` (`added`) or `unlinked` event on each end, and bump both tasks' `updated_at`.

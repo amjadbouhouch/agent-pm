@@ -185,7 +185,7 @@ fn find(conn: &Connection, project: &str, name: &str) -> Result<i64> {
 }
 
 /// A new milestone name, trimmed; empty is an error.
-fn clean_name(name: &str) -> Result<&str> {
+pub fn clean_name(name: &str) -> Result<&str> {
     let name = name.trim();
     if name.is_empty() {
         return Err(err("milestone name cannot be empty"));
