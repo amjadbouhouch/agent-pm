@@ -1,8 +1,10 @@
 use clap::Subcommand;
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::Serialize;
 
-use super::{Ctx, not_implemented};
+use super::Ctx;
 use crate::error::{Result, err};
+use crate::{db, model, output};
 
 #[derive(Subcommand, Debug)]
 pub enum MilestoneCmd {
@@ -40,6 +42,7 @@ pub enum MilestoneCmd {
         rename: Option<String>,
         #[arg(short, long)]
         description: Option<String>,
+        /// New due date, YYYY-MM-DD ("" clears it)
         #[arg(long)]
         due: Option<String>,
     },
@@ -63,8 +66,57 @@ pub enum MilestoneCmd {
     },
 }
 
-pub fn run(_ctx: &Ctx, _cmd: MilestoneCmd) -> Result<()> {
-    Err(not_implemented("milestone"))
+#[derive(Serialize, Debug)]
+pub struct Milestone {
+    #[serde(skip)]
+    pub id: i64,
+    pub name: String,
+    pub project: String,
+    pub description: String,
+    pub due: Option<String>,
+    pub status: String,
+    pub progress: Progress,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// `total` counts tasks that are not cancelled; `done` and `cancelled` count those statuses.
+#[derive(Serialize, Debug)]
+pub struct Progress {
+    pub total: i64,
+    pub done: i64,
+    pub cancelled: i64,
+}
+
+#[derive(Serialize, Debug)]
+struct MilestoneItem {
+    id: String,
+    status: String,
+    title: String,
+    assignee: Option<String>,
+}
+
+pub fn run(ctx: &Ctx, cmd: MilestoneCmd) -> Result<()> {
+    match cmd {
+        MilestoneCmd::Add {
+            name,
+            project,
+            description,
+            due,
+        } => add(ctx, &project, &name, description, due),
+        MilestoneCmd::List { project, all } => list(ctx, &project, all),
+        MilestoneCmd::Show { name, project } => show(ctx, &project, &name),
+        MilestoneCmd::Edit {
+            name,
+            project,
+            rename,
+            description,
+            due,
+        } => edit(ctx, &project, &name, rename, description, due),
+        MilestoneCmd::Close { name, project } => set_status(ctx, &project, &name, "closed"),
+        MilestoneCmd::Reopen { name, project } => set_status(ctx, &project, &name, "open"),
+        MilestoneCmd::Rm { name, project } => rm(ctx, &project, &name),
+    }
 }
 
 /// Milestone id for a name within a project. Used by item add/edit/list.
@@ -76,4 +128,238 @@ pub fn resolve(conn: &Connection, project_id: i64, name: &str) -> Result<i64> {
     )
     .optional()?
     .ok_or_else(|| err(format!("no such milestone: {name}")))
+}
+
+/// A milestone with its progress, by id.
+pub fn load(conn: &Connection, id: i64) -> Result<Milestone> {
+    Ok(conn.query_row(
+        "SELECT m.id, m.name, p.key, m.description, m.due, m.status, m.created_at, m.updated_at,
+                COUNT(i.id) - COUNT(CASE WHEN i.status = 'cancelled' THEN 1 END),
+                COUNT(CASE WHEN i.status = 'done' THEN 1 END),
+                COUNT(CASE WHEN i.status = 'cancelled' THEN 1 END)
+         FROM milestones m
+         JOIN projects p ON p.id = m.project_id
+         LEFT JOIN items i ON i.milestone_id = m.id
+         WHERE m.id = ?1
+         GROUP BY m.id",
+        params![id],
+        |r| {
+            Ok(Milestone {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                project: r.get(2)?,
+                description: r.get(3)?,
+                due: r.get(4)?,
+                status: r.get(5)?,
+                created_at: r.get(6)?,
+                updated_at: r.get(7)?,
+                progress: Progress {
+                    total: r.get(8)?,
+                    done: r.get(9)?,
+                    cancelled: r.get(10)?,
+                },
+            })
+        },
+    )?)
+}
+
+/// Resolve `-p KEY` and a milestone name to its id.
+fn find(conn: &Connection, project: &str, name: &str) -> Result<i64> {
+    resolve(conn, db::project_id(conn, project)?, name)
+}
+
+fn check_name(conn: &Connection, project_id: i64, name: &str) -> Result<()> {
+    if name.trim().is_empty() {
+        return Err(err("milestone name cannot be empty"));
+    }
+    let taken = conn
+        .query_row(
+            "SELECT 1 FROM milestones WHERE project_id = ?1 AND name = ?2",
+            params![project_id, name],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if taken {
+        return Err(err(format!("milestone already exists: {name}")));
+    }
+    Ok(())
+}
+
+/// Print a written milestone: the full object under `--json`, else `<verb> milestone <name>`.
+fn written(ctx: &Ctx, id: i64, verb: &str) -> Result<()> {
+    let m = load(&ctx.conn, id)?;
+    if ctx.json {
+        output::json(&m)
+    } else {
+        println!("{verb} milestone {}", m.name);
+        Ok(())
+    }
+}
+
+fn add(
+    ctx: &Ctx,
+    project: &str,
+    name: &str,
+    description: Option<String>,
+    due: Option<String>,
+) -> Result<()> {
+    let project_id = db::project_id(&ctx.conn, project)?;
+    check_name(&ctx.conn, project_id, name)?;
+    if let Some(d) = &due {
+        model::check_date(d)?;
+    }
+    ctx.conn.execute(
+        "INSERT INTO milestones (project_id, name, description, due) VALUES (?1, ?2, ?3, ?4)",
+        params![project_id, name, description.unwrap_or_default(), due],
+    )?;
+    written(ctx, ctx.conn.last_insert_rowid(), "created")
+}
+
+fn list(ctx: &Ctx, project: &str, all: bool) -> Result<()> {
+    let project_id = db::project_id(&ctx.conn, project)?;
+    let mut stmt = ctx.conn.prepare(
+        "SELECT id FROM milestones WHERE project_id = ?1 AND (?2 OR status = 'open')
+         ORDER BY due IS NULL, due, id",
+    )?;
+    let ids = stmt
+        .query_map(params![project_id, all], |r| r.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let milestones = ids
+        .into_iter()
+        .map(|id| load(&ctx.conn, id))
+        .collect::<Result<Vec<_>>>()?;
+    if ctx.json {
+        return output::json(&milestones);
+    }
+    let rows: Vec<Vec<String>> = milestones
+        .iter()
+        .map(|m| {
+            vec![
+                m.name.clone(),
+                m.status.clone(),
+                m.due.clone().unwrap_or_else(|| "-".into()),
+                format!("{}/{}", m.progress.done, m.progress.total),
+            ]
+        })
+        .collect();
+    output::table(&["NAME", "STATUS", "DUE", "DONE"], &rows);
+    Ok(())
+}
+
+fn show(ctx: &Ctx, project: &str, name: &str) -> Result<()> {
+    let m = load(&ctx.conn, find(&ctx.conn, project, name)?)?;
+    let mut stmt = ctx.conn.prepare(
+        "SELECT seq, status, title, assignee FROM items WHERE milestone_id = ?1 ORDER BY seq",
+    )?;
+    let items = stmt
+        .query_map(params![m.id], |r| {
+            Ok(MilestoneItem {
+                id: format!("{}-{}", m.project, r.get::<_, i64>(0)?),
+                status: r.get(1)?,
+                title: r.get(2)?,
+                assignee: r.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if ctx.json {
+        let mut v = serde_json::to_value(&m)?;
+        v["items"] = serde_json::to_value(&items)?;
+        return output::json(&v);
+    }
+    println!("{} ({}, {})", m.name, m.project, m.status);
+    if let Some(due) = &m.due {
+        println!("due: {due}");
+    }
+    println!("progress: {}/{} done", m.progress.done, m.progress.total);
+    if !m.description.is_empty() {
+        println!("{}", m.description);
+    }
+    let rows: Vec<Vec<String>> = items
+        .into_iter()
+        .map(|i| {
+            vec![
+                i.id,
+                i.status,
+                i.assignee.unwrap_or_else(|| "-".into()),
+                i.title,
+            ]
+        })
+        .collect();
+    if !rows.is_empty() {
+        println!();
+    }
+    output::table(&["ID", "STATUS", "ASSIGNEE", "TITLE"], &rows);
+    Ok(())
+}
+
+fn edit(
+    ctx: &Ctx,
+    project: &str,
+    name: &str,
+    rename: Option<String>,
+    description: Option<String>,
+    due: Option<String>,
+) -> Result<()> {
+    if rename.is_none() && description.is_none() && due.is_none() {
+        return Err(err(
+            "nothing to change: pass --rename, --description or --due",
+        ));
+    }
+    let project_id = db::project_id(&ctx.conn, project)?;
+    let id = resolve(&ctx.conn, project_id, name)?;
+    if let Some(new) = rename.as_deref().filter(|n| *n != name) {
+        check_name(&ctx.conn, project_id, new)?;
+    }
+    // Some("") clears the due date.
+    let due = due.map(|d| {
+        if d.is_empty() {
+            Ok(None)
+        } else {
+            model::check_date(&d).map(|_| Some(d))
+        }
+    });
+    let due = due.transpose()?;
+    ctx.conn.execute(
+        "UPDATE milestones SET
+            name = COALESCE(?2, name),
+            description = COALESCE(?3, description),
+            due = CASE WHEN ?4 THEN ?5 ELSE due END,
+            updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+         WHERE id = ?1",
+        params![id, rename, description, due.is_some(), due.flatten()],
+    )?;
+    written(ctx, id, "updated")
+}
+
+/// Close or reopen. Setting the status a milestone already has is a no-op, not an error.
+fn set_status(ctx: &Ctx, project: &str, name: &str, status: &str) -> Result<()> {
+    let id = find(&ctx.conn, project, name)?;
+    ctx.conn.execute(
+        "UPDATE milestones SET status = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+         WHERE id = ?1 AND status != ?2",
+        params![id, status],
+    )?;
+    written(
+        ctx,
+        id,
+        if status == "closed" {
+            "closed"
+        } else {
+            "reopened"
+        },
+    )
+}
+
+/// Delete a milestone. Its tasks stay, with no milestone (ON DELETE SET NULL).
+fn rm(ctx: &Ctx, project: &str, name: &str) -> Result<()> {
+    let m = load(&ctx.conn, find(&ctx.conn, project, name)?)?;
+    ctx.conn
+        .execute("DELETE FROM milestones WHERE id = ?1", params![m.id])?;
+    if ctx.json {
+        output::json(&m)
+    } else {
+        println!("removed milestone {}", m.name);
+        Ok(())
+    }
 }
