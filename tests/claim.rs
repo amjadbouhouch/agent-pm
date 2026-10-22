@@ -117,7 +117,7 @@ fn claim_shows_in_json_show_and_history() {
         .assert()
         .success();
     let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
-    assert!(text.starts_with("claimed APM-1 until "), "{text}");
+    assert!(text.starts_with("renewed APM-1 until "), "{text}");
     assert!(
         (1800..=1802).contains(&claim_secs(&env, 1)),
         "a renewal keeps claimed_at"
@@ -135,7 +135,8 @@ fn claim_shows_in_json_show_and_history() {
 #[test]
 fn someone_elses_live_claim_needs_steal() {
     let env = env_tasks(1);
-    as_(&env, "alice", &["claim", "APM-1"]);
+    let alice = as_(&env, "alice", &["claim", "APM-1"])["claim"]["expires"].clone();
+    let alice = alice.as_str().unwrap();
     let e = as_err(&env, "bob", &["claim", "APM-1"]);
     assert!(e.starts_with("APM-1 is claimed by alice until "), "{e}");
     assert!(e.ends_with("; pass --steal to take it"), "{e}");
@@ -146,7 +147,7 @@ fn someone_elses_live_claim_needs_steal() {
         [
             ev("alice", "claimed", None, None),
             ev("bob", "released", Some("stolen"), Some("alice")),
-            ev("bob", "claimed", None, None),
+            ev("bob", "claimed", None, Some(alice)),
         ]
     );
 }
@@ -173,7 +174,7 @@ fn an_expired_claim_is_ignored_everywhere() {
     // Bob claims it without --steal, and `next` would have offered it to him too.
     assert_eq!(as_(&env, "bob", &["claim", "APM-1"])["claim"]["by"], "bob");
     expire(&env, 1);
-    assert_eq!(as_(&env, "carol", &["next"])["id"], "APM-1");
+    assert_eq!(as_(&env, "carol", &["next"])["task"]["id"], "APM-1");
     assert_eq!(
         claim_events(&env, 1),
         [
@@ -371,7 +372,7 @@ fn next_picks_by_priority_then_due_then_id() {
     ]); // 5
     let order: Vec<String> = (0..5)
         .map(|n| {
-            as_(&env, &format!("bot{n}"), &["next"])["id"]
+            as_(&env, &format!("bot{n}"), &["next"])["task"]["id"]
                 .as_str()
                 .unwrap()
                 .to_string()
@@ -405,7 +406,9 @@ fn next_claims_assigns_and_starts() {
         "--position",
         "2",
     ]);
-    let v = as_(&env, "bot", &["next", "--ttl", "45m"]);
+    let out = as_(&env, "bot", &["next", "--ttl", "45m"]);
+    assert_eq!(out["renewed"], false);
+    let v = &out["task"];
     assert_eq!(v["id"], "APM-1");
     assert_eq!(v["claim"]["by"], "bot");
     assert_eq!(v["assignee"], "bot");
@@ -435,8 +438,9 @@ fn next_claims_assigns_and_starts() {
     assert_eq!(got, want);
     // Its claimant gets it again (renewed); an active task keeps its status and assignee.
     let v = as_(&env, "bot", &["next"]);
+    assert_eq!(v["renewed"], true);
     assert_eq!(
-        (v["id"].as_str(), v["status"].as_str()),
+        (v["task"]["id"].as_str(), v["task"]["status"].as_str()),
         (Some("APM-1"), Some("wip"))
     );
     assert!(
@@ -455,7 +459,7 @@ fn next_skips_what_is_not_ready_for_the_actor() {
     env.json(&["done", "APM-6"]); // closed
     env.json(&["edit", "APM-1", "-a", "bot"]); // assigned to me: fine
     let next = |who: &str| {
-        as_(&env, who, &["next"])["id"]
+        as_(&env, who, &["next"])["task"]["id"]
             .as_str()
             .unwrap()
             .to_string()
@@ -484,12 +488,18 @@ fn next_filters_by_project_tag_and_milestone() {
     env.json(&["edit", "APM-2", "--tag", "db"]);
     env.json(&["edit", "APM-3", "-m", "v1", "--tag", "db"]);
     assert_eq!(
-        as_(&env, "a", &["next", "-p", "apm", "--tag", "db", "-m", "v1"])["id"],
+        as_(&env, "a", &["next", "-p", "apm", "--tag", "db", "-m", "v1"])["task"]["id"],
         "APM-3"
     );
-    assert_eq!(as_(&env, "b", &["next", "--tag", "DB"])["id"], "APM-2");
-    assert_eq!(as_(&env, "c", &["next", "-p", "APM"])["id"], "APM-1");
-    assert_eq!(as_(&env, "d", &["next"])["id"], "OPS-1");
+    assert_eq!(
+        as_(&env, "b", &["next", "--tag", "DB"])["task"]["id"],
+        "APM-2"
+    );
+    assert_eq!(
+        as_(&env, "c", &["next", "-p", "APM"])["task"]["id"],
+        "APM-1"
+    );
+    assert_eq!(as_(&env, "d", &["next"])["task"]["id"], "OPS-1");
     assert_eq!(
         as_err(&env, "e", &["next", "-m", "v9"]),
         "no such milestone: v9"
@@ -505,7 +515,7 @@ fn next_with_nothing_ready_exits_3() {
     let env = env_tasks(0);
     let out = env.apm().args(["--json", "next"]).assert().code(3);
     let v: Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
-    assert_eq!(v, json!({ "task": null }));
+    assert_eq!(v, json!({ "task": null, "renewed": false }));
     assert!(out.get_output().stderr.is_empty());
     let out = env.apm().args(["next", "-p", "APM"]).assert().code(3);
     assert_eq!(
@@ -556,11 +566,11 @@ fn parallel_next_claims_each_task_once() {
             let v: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
             match out.status.code() {
                 Some(0) => got.push((
-                    v["id"].as_str().unwrap().to_string(),
-                    v["claim"]["by"].clone(),
+                    v["task"]["id"].as_str().unwrap().to_string(),
+                    v["task"]["claim"]["by"].clone(),
                 )),
                 Some(3) => {
-                    assert_eq!(v, json!({ "task": null }));
+                    assert_eq!(v, json!({ "task": null, "renewed": false }));
                     empty += 1;
                 }
                 code => panic!("round {round}: exit {code:?}: {stderr}"),
@@ -593,4 +603,127 @@ fn parallel_next_claims_each_task_once() {
             .unwrap();
         assert_eq!(n, TASKS as i64);
     }
+}
+
+#[test]
+fn renewing_records_the_previous_expiry() {
+    let env = env_tasks(1);
+    let first = as_(&env, "alice", &["claim", "APM-1", "--ttl", "1h"]);
+    let first = first["claim"]["expires"].as_str().unwrap().to_string();
+    let out = env
+        .apm()
+        .args(["--as", "alice", "claim", "APM-1", "--ttl", "3h"])
+        .assert()
+        .success();
+    let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(text.starts_with("renewed APM-1 until "), "{text}");
+    assert_eq!(
+        claim_events(&env, 1),
+        [
+            ev("alice", "claimed", None, None),
+            ev("alice", "claimed", None, Some(&first)),
+        ]
+    );
+}
+
+/// An agent that took a task with `next` and went away does not strand it: once its claim
+/// lapses, `next` hands the task to another agent. A hand-assigned task stays protected.
+#[test]
+fn next_takes_over_a_task_whose_claim_lapsed() {
+    let env = env_tasks(2);
+    env.json(&["edit", "APM-2", "-a", "alice"]);
+    assert_eq!(as_(&env, "bot", &["next"])["task"]["id"], "APM-1");
+    expire(&env, 1);
+    let v = as_(&env, "carol", &["next"]);
+    assert_eq!(v["renewed"], false);
+    assert_eq!(v["task"]["id"], "APM-1");
+    assert_eq!(v["task"]["assignee"], "carol");
+    assert_eq!(v["task"]["claim"]["by"], "carol");
+    let h = env.json(&["history", "APM-1"]);
+    let assignee: Vec<(Value, Value)> = h
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["field"] == "assignee")
+        .map(|e| (e["old"].clone(), e["new"].clone()))
+        .collect();
+    assert_eq!(
+        assignee,
+        [(Value::Null, json!("bot")), (json!("bot"), json!("carol"))]
+    );
+    // APM-2 was assigned by hand (no claim): nobody else gets it.
+    env.apm().args(["--as", "dave", "next"]).assert().code(3);
+    // Nor does a task whose holder released it on purpose (the claim is gone, not lapsed).
+    as_(&env, "carol", &["release", "APM-1"]);
+    env.apm().args(["--as", "dave", "next"]).assert().code(3);
+}
+
+#[test]
+fn next_leaves_the_status_when_the_project_has_no_active_status() {
+    let env = env_tasks(1);
+    env.json(&["status", "rm", "doing", "-p", "APM"]);
+    env.json(&["status", "rm", "blocked", "-p", "APM"]);
+    let v = as_(&env, "bot", &["next"]);
+    assert_eq!(v["task"]["id"], "APM-1");
+    assert_eq!(v["task"]["status"], "todo");
+    assert_eq!(v["task"]["claim"]["by"], "bot");
+}
+
+/// A restarted agent resumes the task it holds instead of grabbing a more urgent one.
+#[test]
+fn next_resumes_the_actors_own_claim_first() {
+    let env = env_tasks(2);
+    env.json(&["edit", "APM-1", "--priority", "urgent"]);
+    as_(&env, "bot", &["claim", "APM-2"]);
+    let v = as_(&env, "bot", &["next"]);
+    assert_eq!(
+        (v["task"]["id"].as_str(), v["renewed"].as_bool()),
+        (Some("APM-2"), Some(true))
+    );
+    let out = env.apm().args(["--as", "bot", "next"]).assert().success();
+    let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        text.starts_with("renewed APM-2 until ") && text.ends_with(": t2\n"),
+        "{text}"
+    );
+    assert_eq!(as_(&env, "eve", &["next"])["task"]["id"], "APM-1");
+}
+
+#[test]
+fn closing_a_status_bumps_updated_at_of_released_tasks() {
+    let env = env_tasks(2);
+    as_(&env, "alice", &["claim", "APM-1"]);
+    env.conn()
+        .execute("UPDATE items SET updated_at = '2020-01-01T00:00:00Z'", [])
+        .unwrap();
+    env.json(&["status", "edit", "todo", "-p", "APM", "--category", "done"]);
+    let one = env.json(&["show", "APM-1"]);
+    assert_eq!(one["claim"], Value::Null);
+    assert_ne!(one["updated_at"], "2020-01-01T00:00:00Z");
+    // APM-2 had no claim: nothing about it changed but its status's category.
+    assert_eq!(
+        env.json(&["show", "APM-2"])["updated_at"],
+        "2020-01-01T00:00:00Z"
+    );
+    let last = claim_events(&env, 1).pop().unwrap();
+    assert_eq!(last, ev("tester", "released", Some("done"), Some("alice")));
+}
+
+/// Safety net: a claim on a closed task is never live, even if some path closed it without
+/// releasing the claim.
+#[test]
+fn a_claim_on_a_closed_task_is_never_live() {
+    let env = env_tasks(1);
+    as_(&env, "alice", &["claim", "APM-1"]);
+    env.conn()
+        .execute(
+            "UPDATE items SET status_id = (SELECT id FROM statuses WHERE name = 'done')",
+            [],
+        )
+        .unwrap();
+    assert_eq!(env.json(&["show", "APM-1"])["claim"], Value::Null);
+    assert_eq!(env.json(&["claims"]), json!([]));
+    assert_eq!(env.json(&["list", "--claimed", "--all"]), json!([]));
+    let v = as_(&env, "alice", &["release", "APM-1"]);
+    assert_eq!(v["claim"], Value::Null);
 }

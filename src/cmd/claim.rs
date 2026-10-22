@@ -1,5 +1,6 @@
 //! Claims: "agent X is working on this task, until T". `claim`, `release`, `next`, `claims`.
-//! A claim is live while `claim_expires` is in the future; an expired one is ignored everywhere.
+//! A claim is live while `claim_expires` is in the future and the task is open; any other
+//! claim is ignored everywhere.
 
 use clap::{Args, ValueEnum};
 use rusqlite::types::Value as SqlValue;
@@ -15,9 +16,49 @@ use crate::output;
 /// Exit code of `next` when no task is ready (errors are 1, usage errors 2).
 pub const NOTHING_READY: i32 = 3;
 
-/// SQL condition over `items i`: the task has a live claim. Never NULL, so `NOT` works.
-pub const LIVE: &str =
-    "(i.claim_expires IS NOT NULL AND i.claim_expires > strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))";
+/// SQL condition over `items i` joined with `statuses s`: the task has a live claim. A claim
+/// on a closed task is never live, whatever path closed it. Never NULL, so `NOT` works.
+pub fn live() -> String {
+    let closed: Vec<String> = Category::value_variants()
+        .iter()
+        .filter(|c| c.is_closed())
+        .map(|c| format!("'{}'", c.as_str()))
+        .collect();
+    format!(
+        "({} AND s.category NOT IN ({}))",
+        unexpired(),
+        closed.join(", ")
+    )
+}
+
+/// SQL condition over `items i`: the claim has not expired (the task may be closed).
+fn unexpired() -> String {
+    format!(
+        "(i.claim_expires IS NOT NULL AND i.claim_expires > {})",
+        db::NOW_SQL
+    )
+}
+
+/// Why a live claim was dropped: `released` events store it as `field`.
+#[derive(Clone, Copy, Debug)]
+enum Reason {
+    /// `release`.
+    Manual,
+    /// The task was closed.
+    Done,
+    /// `claim --steal` by someone else.
+    Stolen,
+}
+
+impl Reason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Reason::Manual => "manual",
+            Reason::Done => "done",
+            Reason::Stolen => "stolen",
+        }
+    }
+}
 
 /// A live claim as printed in item JSON (`"claim"`).
 #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -25,6 +66,14 @@ pub struct Claim {
     pub by: String,
     pub at: String,
     pub expires: String,
+}
+
+/// `next`'s output: the claimed task (null when nothing is ready), and whether it was the
+/// actor's own claim, renewed.
+#[derive(Serialize)]
+struct Next {
+    task: Option<item::Item>,
+    renewed: bool,
 }
 
 #[derive(Args, Debug)]
@@ -76,13 +125,14 @@ pub struct ClaimsArgs {
 pub fn claim(ctx: &Ctx, args: ClaimArgs) -> Result<()> {
     let tx = db::write_tx(&ctx.conn)?;
     let r = db::item(&tx, &args.key)?;
-    let expires = take(&tx, &ctx.actor, r.id, args.ttl, args.steal)?;
+    let (expires, renewed) = take(&tx, &ctx.actor, r.id, args.ttl, args.steal)?;
     tx.commit()?;
     let item = item::get(&ctx.conn, r.id)?;
+    let verb = if renewed { "renewed" } else { "claimed" };
     output::written(
         ctx.json,
         &item,
-        &format!("claimed {} until {expires}", item.id),
+        &format!("{verb} {} until {expires}", item.id),
     )
 }
 
@@ -101,43 +151,39 @@ pub fn release(ctx: &Ctx, args: ReleaseArgs) -> Result<()> {
             ctx.actor
         )));
     }
-    drop_claim(&tx, &ctx.actor, r.id, &holder, "manual")?;
-    tx.execute(
-        &format!(
-            "UPDATE items SET updated_at = {} WHERE id = ?1",
-            db::NOW_SQL
-        ),
-        params![r.id],
-    )?;
+    drop_claim(&tx, &ctx.actor, r.id, &holder, Reason::Manual)?;
+    touch(&tx, r.id)?;
     tx.commit()?;
     let item = item::get(&ctx.conn, r.id)?;
     output::written(ctx.json, &item, &format!("released {}", item.id))
 }
 
 /// `apm next`: in one write transaction, pick the best ready task, claim it, assign it to the
-/// actor if unassigned and start it if it is in a todo-category status. Returns the exit
-/// code: 0, or `NOTHING_READY`.
+/// actor and start it if it is in a todo-category status (when the project has an active
+/// one). Returns the exit code: 0, or `NOTHING_READY`.
 pub fn next(ctx: &Ctx, args: NextArgs) -> Result<i32> {
     let tx = db::write_tx(&ctx.conn)?;
-    let Some(id) = pick(&tx, &ctx.actor, &args)? else {
+    let Some(r) = pick(&tx, &ctx.actor, &args)? else {
         drop(tx);
-        if ctx.json {
-            output::json(&serde_json::json!({ "task": null }))?;
-        } else {
-            println!("nothing ready");
-        }
+        let none = Next {
+            task: None,
+            renewed: false,
+        };
+        output::written(ctx.json, &none, "nothing ready")?;
         return Ok(NOTHING_READY);
     };
-    let before = item::get(&tx, id)?;
-    let expires = take(&tx, &ctx.actor, id, args.ttl, false)?;
-    if before.assignee.as_deref().unwrap_or_default().is_empty() {
+    let before = item::get(&tx, r.id)?;
+    let (expires, renewed) = take(&tx, &ctx.actor, r.id, args.ttl, false)?;
+    // `pick` only offers tasks that are unassigned, the actor's, or assigned to the holder
+    // of a lapsed claim: those become the actor's.
+    if before.assignee.as_deref() != Some(ctx.actor.as_str()) {
         tx.execute(
             "UPDATE items SET assignee = ?1 WHERE id = ?2",
-            params![ctx.actor, id],
+            params![ctx.actor, r.id],
         )?;
         db::record_event(
             &tx,
-            id,
+            r.id,
             &ctx.actor,
             EventKind::Changed,
             Some("assignee"),
@@ -145,17 +191,16 @@ pub fn next(ctx: &Ctx, args: NextArgs) -> Result<i32> {
             Some(&ctx.actor),
         )?;
     }
-    if before.status_category == Category::Todo.as_str() {
-        let project_id = db::project_id(&tx, &before.project)?;
-        let start = status::for_shortcut(&tx, project_id, status::Shortcut::Start)?;
+    let start = status::first_in(&tx, r.project_id, Category::Active)?;
+    if let Some(start) = start.filter(|_| before.status_category == Category::Todo.as_str()) {
         tx.execute(
             "UPDATE items SET status_id = ?1 WHERE id = ?2",
-            params![start, id],
+            params![start, r.id],
         )?;
-        let after = item::get(&tx, id)?;
+        let after = item::get(&tx, r.id)?;
         db::record_event(
             &tx,
-            id,
+            r.id,
             &ctx.actor,
             EventKind::Changed,
             Some("status"),
@@ -164,16 +209,21 @@ pub fn next(ctx: &Ctx, args: NextArgs) -> Result<i32> {
         )?;
     }
     tx.commit()?;
-    let item = item::get(&ctx.conn, id)?;
-    let line = format!("claimed {} until {expires}: {}", item.id, item.title);
-    output::written(ctx.json, &item, &line)?;
+    let item = item::get(&ctx.conn, r.id)?;
+    let verb = if renewed { "renewed" } else { "claimed" };
+    let line = format!("{verb} {} until {expires}: {}", item.id, item.title);
+    let next = Next {
+        task: Some(item),
+        renewed,
+    };
+    output::written(ctx.json, &next, &line)?;
     Ok(0)
 }
 
 /// `apm claims`: tasks with a live claim, soonest expiry first.
 pub fn claims(ctx: &Ctx, args: ClaimsArgs) -> Result<()> {
     let conn = &ctx.conn;
-    let mut conds = vec![LIVE.to_string()];
+    let mut conds = vec![live()];
     let mut vals: Vec<SqlValue> = Vec::new();
     if let Some(key) = &args.project {
         let id = db::project_id(conn, key)?;
@@ -208,44 +258,53 @@ pub fn claims(ctx: &Ctx, args: ClaimsArgs) -> Result<()> {
     Ok(())
 }
 
-/// Drop the claim of a task that is now in a closed (done/cancelled-category) status. A live
-/// claim records `released` with reason `done`; an expired one is cleared silently. Call it
-/// in the transaction that changed the status.
-pub fn release_if_closed(conn: &Connection, actor: &str, item_id: i64) -> Result<()> {
-    let (category, claimed): (String, bool) = conn.query_row(
-        "SELECT s.category, i.claimed_by IS NOT NULL
-         FROM items i JOIN statuses s ON s.id = i.status_id WHERE i.id = ?1",
+/// Drop the claim of a task that is now in a closed (done/cancelled-category) status. An
+/// unexpired claim records `released` with reason `done`; an expired one is cleared silently.
+/// Call it in the transaction that changed the status. Returns whether a claim was released;
+/// the caller bumps `updated_at` if its change did not already.
+pub fn release_if_closed(conn: &Connection, actor: &str, item_id: i64) -> Result<bool> {
+    let (category, holder): (String, Option<String>) = conn.query_row(
+        &format!(
+            "SELECT s.category, CASE WHEN {} THEN i.claimed_by END
+             FROM items i JOIN statuses s ON s.id = i.status_id WHERE i.id = ?1",
+            unexpired()
+        ),
         params![item_id],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    if !is_closed(&category) || !claimed {
-        return Ok(());
+    if !is_closed(&category) {
+        return Ok(false);
     }
-    match live_holder(conn, item_id)? {
-        Some(holder) => drop_claim(conn, actor, item_id, &holder, "done"),
-        None => clear(conn, item_id),
+    match &holder {
+        Some(holder) => drop_claim(conn, actor, item_id, holder, Reason::Done)?,
+        None => clear(conn, item_id)?,
     }
+    Ok(holder.is_some())
 }
 
 /// Claim a task for `actor` for `ttl` seconds, recording `claimed` (and `released` with reason
-/// `stolen` when taking someone else's live claim). Returns the new expiry.
-fn take(conn: &Connection, actor: &str, item_id: i64, ttl: i64, steal: bool) -> Result<String> {
+/// `stolen` when taking someone else's live claim). Returns the new expiry and whether it
+/// renewed the actor's own live claim.
+fn take(
+    conn: &Connection,
+    actor: &str,
+    item_id: i64,
+    ttl: i64,
+    steal: bool,
+) -> Result<(String, bool)> {
     let it = item::get(conn, item_id)?;
     if is_closed(&it.status_category) {
         return Err(err(format!("cannot claim {}: it is {}", it.id, it.status)));
     }
-    let mut renew = false;
-    if let Some(c) = &it.claim {
-        if c.by == actor {
-            renew = true;
-        } else if steal {
-            drop_claim(conn, actor, item_id, &c.by, "stolen")?;
-        } else {
+    let renew = it.claim.as_ref().is_some_and(|c| c.by == actor);
+    if let Some(c) = it.claim.as_ref().filter(|_| !renew) {
+        if !steal {
             return Err(err(format!(
                 "{} is claimed by {} until {}; pass --steal to take it",
                 it.id, c.by, c.expires
             )));
         }
+        drop_claim(conn, actor, item_id, &c.by, Reason::Stolen)?;
     }
     // A renewal keeps the original claim time.
     let expires: String = conn.query_row(
@@ -260,16 +319,18 @@ fn take(conn: &Connection, actor: &str, item_id: i64, ttl: i64, steal: bool) -> 
         params![actor, renew, ttl, item_id],
         |r| r.get(0),
     )?;
+    // old = the expiry of the claim this one replaces (renewed or stolen).
+    let previous = it.claim.as_ref().map(|c| c.expires.as_str());
     db::record_event(
         conn,
         item_id,
         actor,
         EventKind::Claimed,
         None,
-        None,
+        previous,
         Some(&expires),
     )?;
-    Ok(expires)
+    Ok((expires, renew))
 }
 
 /// Whether a status category (as stored) is done or cancelled.
@@ -283,20 +344,24 @@ fn is_closed(category: &str) -> bool {
 fn live_holder(conn: &Connection, item_id: i64) -> Result<Option<String>> {
     Ok(conn
         .query_row(
-            &format!("SELECT i.claimed_by FROM items i WHERE i.id = ?1 AND {LIVE}"),
+            &format!(
+                "SELECT i.claimed_by FROM items i JOIN statuses s ON s.id = i.status_id
+                 WHERE i.id = ?1 AND {}",
+                live()
+            ),
             params![item_id],
             |r| r.get(0),
         )
         .optional()?)
 }
 
-/// Clear a live claim and record `released` with a reason (`manual`, `done`, `stolen`).
+/// Clear a claim and record `released` with its reason; old = the holder.
 fn drop_claim(
     conn: &Connection,
     actor: &str,
     item_id: i64,
     holder: &str,
-    reason: &str,
+    reason: Reason,
 ) -> Result<()> {
     clear(conn, item_id)?;
     db::record_event(
@@ -304,7 +369,7 @@ fn drop_claim(
         item_id,
         actor,
         EventKind::Released,
-        Some(reason),
+        Some(reason.as_str()),
         Some(holder),
         None,
     )
@@ -319,22 +384,41 @@ fn clear(conn: &Connection, item_id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Bump a task's `updated_at`.
+pub fn touch(conn: &Connection, item_id: i64) -> Result<()> {
+    conn.execute(
+        &format!(
+            "UPDATE items SET updated_at = {} WHERE id = ?1",
+            db::NOW_SQL
+        ),
+        params![item_id],
+    )?;
+    Ok(())
+}
+
 /// The best ready task for `actor`: open, no open blocker, not in a status named blocked, no
-/// live claim by someone else, unassigned or assigned to `actor`; highest priority, then
-/// soonest due (none last), then id.
-fn pick(conn: &Connection, actor: &str, args: &NextArgs) -> Result<Option<i64>> {
+/// live claim by someone else, and unassigned, assigned to `actor`, or assigned to the holder
+/// of a lapsed claim (an agent that took it with `next` and went away). The actor's own
+/// claimed task comes first (a restarted agent resumes it); then highest priority, soonest
+/// due (none last), id.
+fn pick(conn: &Connection, actor: &str, args: &NextArgs) -> Result<Option<db::ItemRef>> {
     let mut vals: Vec<SqlValue> = Vec::new();
     let closed = item::closed_marks(&mut vals);
     let named = item::bind(&mut vals, "blocked".to_string());
     let me = item::bind(&mut vals, actor.to_string());
+    let live = live();
     let mut conds = vec![
         format!("s.category NOT IN ({closed})"),
         format!(
             "NOT (s.name = {named} COLLATE NOCASE OR {})",
             link::has_open_blocker(&closed)
         ),
-        format!("NOT ({LIVE} AND i.claimed_by != {me})"),
-        format!("(i.assignee IS NULL OR i.assignee = '' OR i.assignee = {me})"),
+        format!("NOT ({live} AND i.claimed_by != {me})"),
+        format!(
+            "(i.assignee IS NULL OR i.assignee = '' OR i.assignee = {me}
+              OR (i.assignee = i.claimed_by AND NOT {}))",
+            unexpired()
+        ),
     ];
     let project_id = args
         .project
@@ -352,17 +436,23 @@ fn pick(conn: &Connection, actor: &str, args: &NextArgs) -> Result<Option<i64>> 
         conds.push(item::milestone_cond(conn, project_id, name, &mut vals)?);
     }
     let sql = format!(
-        "SELECT i.id FROM items i
+        "SELECT i.id, i.project_id FROM items i
          JOIN projects p ON p.id = i.project_id
          JOIN statuses s ON s.id = i.status_id
          LEFT JOIN milestones m ON m.id = i.milestone_id
          WHERE {}
-         ORDER BY {} DESC, i.due IS NULL, i.due, p.key, i.seq
+         ORDER BY ({live} AND i.claimed_by = {me}) DESC, {} DESC, i.due IS NULL, i.due,
+                  p.key, i.seq
          LIMIT 1",
         conds.join(" AND "),
         item::priority_rank()
     );
     Ok(conn
-        .query_row(&sql, rusqlite::params_from_iter(vals.iter()), |r| r.get(0))
+        .query_row(&sql, rusqlite::params_from_iter(vals.iter()), |r| {
+            Ok(db::ItemRef {
+                id: r.get(0)?,
+                project_id: r.get(1)?,
+            })
+        })
         .optional()?)
 }

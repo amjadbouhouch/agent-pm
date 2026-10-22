@@ -422,7 +422,7 @@ fn v2_database_upgrades_to_v3() {
         1
     );
     // Claims work on the upgraded database.
-    let v = env.json(&["next"]);
+    let v = &env.json(&["next"])["task"];
     assert_eq!(v["id"], "APM-2");
     assert_eq!(v["claim"]["by"], "tester");
     assert_eq!(env.json(&["show", "APM-1"])["comments"][0]["body"], "hello");

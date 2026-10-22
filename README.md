@@ -84,9 +84,12 @@ apm done APM-4                  # closing a task releases its claim
 
 `next` picks, in one transaction, the open task with the highest priority (then soonest due,
 then id) that has no open blocker, is not in a status named blocked, is not claimed by
-another agent and is unassigned or yours. When nothing is ready it prints `{"task": null}`
-and exits with code 3. A claim expires on its own; `release` drops it early, `claim --steal`
-takes over someone else's, and `apm claims` lists the live ones.
+another agent and is unassigned or yours. A task the agent already holds comes first, so a
+restarted agent resumes it (`"renewed": true`); a task whose claimant's claim lapsed goes to
+the next agent. It prints `{"task": {...}, "renewed": false}`; when nothing is ready,
+`{"task": null, "renewed": false}` and exit code 3. A claim expires on its own; closing the
+task or `release` drops it early, `claim --steal` takes over someone else's, and
+`apm claims` lists the live ones.
 
 ## Commands
 

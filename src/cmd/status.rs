@@ -169,16 +169,21 @@ pub fn for_shortcut(conn: &Connection, project_id: i64, shortcut: Shortcut) -> R
     }
 }
 
+/// The first status of a category by position, if the project has one. Used by `next`.
+pub fn first_in(conn: &Connection, project_id: i64, category: Category) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM statuses WHERE project_id = ?1 AND category = ?2
+             ORDER BY position, id LIMIT 1",
+            params![project_id, category.as_str()],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
 /// The first status of a category by position.
 fn first(conn: &Connection, project_id: i64, category: Category) -> Result<i64> {
-    conn.query_row(
-        "SELECT id FROM statuses WHERE project_id = ?1 AND category = ?2
-         ORDER BY position, id LIMIT 1",
-        params![project_id, category.as_str()],
-        |r| r.get(0),
-    )
-    .optional()?
-    .ok_or_else(|| {
+    first_in(conn, project_id, category)?.ok_or_else(|| {
         err(format!(
             "project {} has no {}-category status",
             project_key(conn, project_id),
@@ -341,7 +346,9 @@ fn edit(
             .collect::<rusqlite::Result<Vec<i64>>>()?;
         drop(stmt);
         for item_id in ids {
-            claim::release_if_closed(&tx, &ctx.actor, item_id)?;
+            if claim::release_if_closed(&tx, &ctx.actor, item_id)? {
+                claim::touch(&tx, item_id)?;
+            }
         }
     }
     tx.commit()?;

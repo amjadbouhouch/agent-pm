@@ -224,19 +224,21 @@ struct Node {
     subtasks: Option<Vec<Node>>,
 }
 
-const SELECT: &str = "
-    SELECT i.id, p.key || '-' || i.seq, p.key, i.title, i.body, s.name, s.category, i.priority,
-           i.assignee, i.due, m.name, p.key || '-' || par.seq,
-           i.created_by, i.created_at, i.updated_at,
-           -- The claim's holder only while it is live (claim::LIVE).
-           CASE WHEN i.claim_expires > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-                THEN i.claimed_by END,
-           i.claimed_at, i.claim_expires
-    FROM items i
-    JOIN projects p ON p.id = i.project_id
-    JOIN statuses s ON s.id = i.status_id
-    LEFT JOIN milestones m ON m.id = i.milestone_id
-    LEFT JOIN items par ON par.id = i.parent_id";
+/// The item query up to WHERE. The claim's holder is selected only while the claim is live.
+fn select() -> String {
+    format!(
+        "SELECT i.id, p.key || '-' || i.seq, p.key, i.title, i.body, s.name, s.category,
+                i.priority, i.assignee, i.due, m.name, p.key || '-' || par.seq,
+                i.created_by, i.created_at, i.updated_at,
+                CASE WHEN {} THEN i.claimed_by END, i.claimed_at, i.claim_expires
+         FROM items i
+         JOIN projects p ON p.id = i.project_id
+         JOIN statuses s ON s.id = i.status_id
+         LEFT JOIN milestones m ON m.id = i.milestone_id
+         LEFT JOIN items par ON par.id = i.parent_id",
+        claim::live()
+    )
+}
 
 pub fn add(ctx: &Ctx, mut args: AddArgs) -> Result<()> {
     check_title(&args.title)?;
@@ -359,7 +361,7 @@ pub fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
     list_links_and_tags(&args, &mut conds, &mut vals)?;
     if args.claimed || args.unclaimed {
         let not = if args.unclaimed { "NOT " } else { "" };
-        conds.push(format!("{not}{}", claim::LIVE));
+        conds.push(format!("{not}{}", claim::live()));
     }
     search_and_due_filters(&args.query, &mut conds, &mut vals)?;
     let order = sort_order(&args.query.sort)?;
@@ -742,7 +744,7 @@ pub fn query_sorted(
     vals: &[SqlValue],
     order: &str,
 ) -> Result<Vec<Item>> {
-    let sql = format!("{SELECT} WHERE {cond} ORDER BY {order}");
+    let sql = format!("{} WHERE {cond} ORDER BY {order}", select());
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_from_iter(vals.iter()), |r| {
         Ok(Item {

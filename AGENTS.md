@@ -12,6 +12,7 @@ attributes. A mini Notion for the terminal.
 - **Agents are the main user.** Every command accepts `--json` and prints stable JSON on stdout;
   errors go to stderr (`error: <msg>`, or `{"error": "<msg>"}` with `--json`) with exit code 1;
   invalid arguments exit 2 (clap's usage text, or the same JSON shape under `--json`).
+  `next` exits 3 when no task is ready (a result, not an error: JSON on stdout).
   Text output stays short and grep-friendly. Never prompt: no interactive confirmations.
 - **Simple over clever.** Plain SQL with `rusqlite`, no ORM, no async, no global state.
 
@@ -40,7 +41,7 @@ src/cmd/<group>.rs one module per command group: its clap args, its `run`, and
                    project, item (add/list/show/edit/rm + shortcuts), milestone, attr,
                    comment, status (custom statuses), link (link/unlink, blockers),
                    tag (tags, `apm tags`), history (`apm history`), mv (`apm move`),
-                   guide (+ guide.txt), db
+                   claim (claim/release/next/claims; live claims), guide (+ guide.txt), db
 src/db.rs          db path, schema migrations, SQL functions, shared lookups (project_id,
                    item KEY-N, current_key), record_event
 src/model.rs       Category, Priority, name=value parsing, date and date-time (`parse_when`)

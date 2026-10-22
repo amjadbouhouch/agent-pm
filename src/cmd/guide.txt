@@ -9,7 +9,7 @@ SETUP
 JSON CONTRACT (--json, works on every command)
   Success: one JSON object or array on stdout. Writes return the written object.
   Errors:  {"error": "<msg>"} on stderr. Exit 1 = command failed, 2 = invalid arguments.
-  `next` exits 3 when no task is ready: {"task": null} (text: `nothing ready`).
+  `next` prints {"task": <task>|null, "renewed": bool}; no task ready = exit 3.
   Without --json: short text lines, errors as `error: <msg>`. apm never prompts.
 
 IDS
@@ -93,8 +93,9 @@ VALUES
   Checkbox: true/false/yes/no/1/0. Date attributes: YYYY-MM-DD; datetime: like due.
   `list` hides done/cancelled-category tasks unless --all or --status.
   Blocked: open, with an open blocker or in a status named blocked; else --ready.
-  Next:     a ready task not claimed by another agent, unassigned or yours; highest
-            priority, then soonest due, then id. A claim expires on its own (no sweeper).
+  Next:     your own claimed task first (renewed); else a ready task not claimed by another
+            agent, unassigned or yours (or its lapsed claimant's); highest priority, then
+            soonest due, then id. A claim expires on its own; closing a task drops it.
 
 COMMANDS
   project add|list|show|edit|rm   manage projects (edit --key re-keys; rm deletes all in it)
