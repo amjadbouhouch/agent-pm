@@ -1,7 +1,8 @@
 # AGENTS.md
 
 `apm` (agent-pm): one small executable that agents and humans use to track projects,
-milestones, tasks, subtasks, assignees and custom attributes. A mini Notion for the terminal.
+milestones, tasks, subtasks, assignees, tags, links, history, custom statuses and custom
+attributes. A mini Notion for the terminal.
 
 ## Principles
 
@@ -57,9 +58,9 @@ scripts/           version-updater.cjs for commit-and-tag-version
   `KEY-N` (per-project sequence, never reused, `db::parse_item_key`). Case-insensitive on input.
   Old ids keep resolving: a re-keyed project's old KEY via `project_aliases`, a moved task's old
   `KEY-N` via `item_aliases`. Always look up through `db::project_id` / `db::item`; output shows
-  current ids only (`db::current_key` for a task's row id). A live key wins: creating or
-  re-keying to a KEY drops the alias of that name (`db::claim_project_key`), so a key is never
-  both live and an alias.
+  current ids only: `db::current_key` when you only have a row id (queries may still join
+  `p.key || '-' || i.seq`). A live key wins: creating or re-keying to a KEY drops the alias of
+  that name (`db::claim_project_key`), so a key is never both live and an alias.
 - History: every task mutation records events with `db::record_event` inside its write
   transaction (`db::write_tx`), one per real change (diff before/after, no-ops record
   nothing). Pick an `EventKind`; a new kind is appended to the enum with a doc comment saying

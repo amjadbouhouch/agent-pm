@@ -22,8 +22,8 @@ prints stable JSON, so agents can parse it; without it, output is short plain te
 - Tags, filtered with `list --tag`, counted with `apm tags`
 - Search (titles, bodies, comments), multi-key sort, limit
 - History: every change to a task, who made it and when
-- Move tasks between projects, re-key projects, rename statuses, milestones and attributes;
-  old ids keep resolving
+- Move tasks and re-key projects (old ids keep resolving); rename statuses, milestones and
+  attributes
 
 ## Install
 
