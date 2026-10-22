@@ -1,13 +1,13 @@
 //! Projects: a KEY, a name and a description. Tasks live in a project.
 
-use clap::Subcommand;
-use rusqlite::{Connection, params};
-use serde::Serialize;
-use serde_json::{Map, Value};
+use clap::{Subcommand, ValueEnum};
+use rusqlite::{Connection, Transaction, TransactionBehavior, ffi, params};
+use serde::{Serialize, Serializer};
 
 use super::Ctx;
 use crate::db;
 use crate::error::{Result, err};
+use crate::model::Status;
 use crate::output;
 
 #[derive(Subcommand, Debug)]
@@ -44,7 +44,22 @@ pub struct Project {
     pub updated_at: String,
 }
 
-const STATUSES: [&str; 5] = ["todo", "doing", "blocked", "done", "cancelled"];
+/// `show`: the project plus its task counts.
+#[derive(Serialize)]
+struct Detail {
+    #[serde(flatten)]
+    project: Project,
+    counts: Counts,
+}
+
+/// Task counts per status, in `Status` order (a JSON object).
+struct Counts(Vec<(&'static str, i64)>);
+
+impl Serialize for Counts {
+    fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.collect_map(self.0.iter().map(|(k, v)| (k, v)))
+    }
+}
 
 pub fn run(ctx: &Ctx, cmd: ProjectCmd) -> Result<()> {
     match cmd {
@@ -74,14 +89,19 @@ fn check_name(name: &str) -> Result<()> {
 fn add(ctx: &Ctx, key: &str, name: &str, description: Option<&str>) -> Result<()> {
     let key = db::check_project_key(key)?;
     check_name(name)?;
-    if db::project_id(&ctx.conn, &key).is_ok() {
-        return Err(err(format!("project already exists: {key}")));
-    }
-    ctx.conn.execute(
+    let inserted = ctx.conn.execute(
         "INSERT INTO projects (key, name, description) VALUES (?1, ?2, ?3)",
         params![key, name, description.unwrap_or("")],
-    )?;
-    let id = db::project_id(&ctx.conn, &key)?;
+    );
+    match inserted {
+        Err(rusqlite::Error::SqliteFailure(e, _))
+            if e.extended_code == ffi::SQLITE_CONSTRAINT_UNIQUE =>
+        {
+            return Err(err(format!("project already exists: {key}")));
+        }
+        r => r?,
+    };
+    let id = ctx.conn.last_insert_rowid();
     print_written(ctx, &get(&ctx.conn, id)?, "created")
 }
 
@@ -107,20 +127,23 @@ fn list(ctx: &Ctx) -> Result<()> {
 
 fn show(ctx: &Ctx, key: &str) -> Result<()> {
     let id = db::project_id(&ctx.conn, key)?;
-    let project = get(&ctx.conn, id)?;
-    let counts = counts(&ctx.conn, id)?;
+    let detail = Detail {
+        project: get(&ctx.conn, id)?,
+        counts: counts(&ctx.conn, id)?,
+    };
     if ctx.json {
-        let mut v = serde_json::to_value(&project)?;
-        v["counts"] = Value::Object(counts);
-        return output::json(&v);
+        return output::json(&detail);
     }
+    let project = &detail.project;
     println!("{}  {}", project.key, project.name);
     if !project.description.is_empty() {
         println!("description: {}", project.description);
     }
-    let counts: Vec<String> = STATUSES
+    let counts: Vec<String> = detail
+        .counts
+        .0
         .iter()
-        .map(|s| format!("{s}={}", counts[*s]))
+        .map(|(s, n)| format!("{s}={n}"))
         .collect();
     println!("tasks: {}", counts.join(" "));
     println!("created: {}", project.created_at);
@@ -145,11 +168,12 @@ fn edit(ctx: &Ctx, key: &str, name: Option<&str>, description: Option<&str>) -> 
 }
 
 fn rm(ctx: &Ctx, key: &str) -> Result<()> {
-    let id = db::project_id(&ctx.conn, key)?;
-    let project = get(&ctx.conn, id)?;
+    let tx = Transaction::new_unchecked(&ctx.conn, TransactionBehavior::Immediate)?;
+    let id = db::project_id(&tx, key)?;
+    let project = get(&tx, id)?;
     // Milestones, tasks, attributes, values and comments go with it (ON DELETE CASCADE).
-    ctx.conn
-        .execute("DELETE FROM projects WHERE id = ?1", params![id])?;
+    tx.execute("DELETE FROM projects WHERE id = ?1", params![id])?;
+    tx.commit()?;
     print_written(ctx, &project, "deleted")
 }
 
@@ -180,17 +204,15 @@ pub fn get(conn: &Connection, id: i64) -> Result<Project> {
 }
 
 /// Task counts (subtasks included) for every status, zeros included.
-fn counts(conn: &Connection, project_id: i64) -> Result<Map<String, Value>> {
-    let mut counts: Map<String, Value> =
-        STATUSES.iter().map(|s| (s.to_string(), 0.into())).collect();
+fn counts(conn: &Connection, project_id: i64) -> Result<Counts> {
     let mut stmt =
-        conn.prepare("SELECT status, count(*) FROM items WHERE project_id = ?1 GROUP BY status")?;
-    let rows = stmt.query_map(params![project_id], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-    })?;
-    for row in rows {
-        let (status, n) = row?;
-        counts.insert(status, n.into());
-    }
-    Ok(counts)
+        conn.prepare("SELECT count(*) FROM items WHERE project_id = ?1 AND status = ?2")?;
+    let counts = Status::value_variants()
+        .iter()
+        .map(|s| {
+            let n = stmt.query_row(params![project_id, s.as_str()], |r| r.get(0))?;
+            Ok((s.as_str(), n))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Counts(counts))
 }

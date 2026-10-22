@@ -85,6 +85,17 @@ fn show_counts_tasks_by_status() {
     env.json(&["add", "c", "--parent", "APM-1"]);
     let v = env.json(&["project", "show", "APM"]);
     assert_eq!(v["counts"]["todo"], 2);
+    // Keys keep their declared order: project fields, then counts in status order.
+    let out = env
+        .apm()
+        .args(["--json", "project", "show", "APM"])
+        .assert()
+        .success();
+    let raw = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let at = |k: &str| raw.find(&format!("\"{k}\"")).unwrap();
+    assert!(at("key") < at("name") && at("name") < at("description"));
+    assert!(at("updated_at") < at("counts"));
+    assert!(at("todo") < at("doing") && at("done") < at("cancelled"));
     assert_eq!(v["counts"]["done"], 1);
 
     assert!(text(&env, &["project", "show", "APM"]).contains("tasks: todo=2 doing=0"));

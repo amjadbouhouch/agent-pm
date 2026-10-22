@@ -1,8 +1,8 @@
 //! Tasks and subtasks ("items"), referenced as KEY-N.
 
-use clap::Args;
+use clap::{Args, ValueEnum};
 use rusqlite::types::Value as SqlValue;
-use rusqlite::{Connection, params, params_from_iter};
+use rusqlite::{Connection, Transaction, TransactionBehavior, params, params_from_iter};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
@@ -139,16 +139,16 @@ const SELECT: &str = "
 const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%SZ', 'now')";
 
 pub fn add(ctx: &Ctx, args: AddArgs) -> Result<()> {
-    let conn = &ctx.conn;
     check_title(&args.title)?;
+    let tx = write_tx(&ctx.conn)?;
     let parent = args
         .parent
         .as_deref()
-        .map(|p| db::item(conn, p))
+        .map(|p| db::item(&tx, p))
         .transpose()?;
     let project_id = match (args.project.as_deref(), parent) {
         (Some(key), Some(parent)) => {
-            let id = db::project_id(conn, key)?;
+            let id = db::project_id(&tx, key)?;
             if id != parent.project_id {
                 return Err(err(format!(
                     "parent {} is not in project {}",
@@ -158,7 +158,7 @@ pub fn add(ctx: &Ctx, args: AddArgs) -> Result<()> {
             }
             id
         }
-        (Some(key), None) => db::project_id(conn, key)?,
+        (Some(key), None) => db::project_id(&tx, key)?,
         (None, Some(parent)) => parent.project_id,
         (None, None) => {
             return Err(err("a project is required: pass -p KEY or --parent KEY-N"));
@@ -167,7 +167,6 @@ pub fn add(ctx: &Ctx, args: AddArgs) -> Result<()> {
     if let Some(due) = &args.due {
         check_date(due)?;
     }
-    let tx = conn.unchecked_transaction()?;
     let milestone_id = args
         .milestone
         .as_deref()
@@ -199,7 +198,7 @@ pub fn add(ctx: &Ctx, args: AddArgs) -> Result<()> {
     let id = tx.last_insert_rowid();
     attr::set_values(&tx, project_id, id, &args.set)?;
     tx.commit()?;
-    print_written(ctx, &get(conn, id)?, "created")
+    print_written(ctx, &get(&ctx.conn, id)?, "created")
 }
 
 pub fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
@@ -222,7 +221,12 @@ pub fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
             .collect();
         conds.push(format!("i.status IN ({})", marks.join(", ")));
     } else if !args.all {
-        conds.push("i.status NOT IN ('done', 'cancelled')".to_string());
+        let marks: Vec<String> = Status::value_variants()
+            .iter()
+            .filter(|s| s.is_closed())
+            .map(|s| bind(&mut vals, s.as_str().to_string()))
+            .collect();
+        conds.push(format!("i.status NOT IN ({})", marks.join(", ")));
     }
     if let Some(who) = &args.assignee {
         conds.push(format!("i.assignee = {}", bind(&mut vals, who.clone())));
@@ -242,7 +246,17 @@ pub fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
                 let id = milestone::resolve(conn, pid, name)?;
                 conds.push(format!("i.milestone_id = {}", bind(&mut vals, id)));
             }
-            None => conds.push(format!("m.name = {}", bind(&mut vals, name.clone()))),
+            None => {
+                let known: bool = conn.query_row(
+                    "SELECT count(*) > 0 FROM milestones WHERE name = ?1",
+                    params![name],
+                    |r| r.get(0),
+                )?;
+                if !known {
+                    return Err(err(format!("no such milestone: {name}")));
+                }
+                conds.push(format!("m.name = {}", bind(&mut vals, name.clone())));
+            }
         }
     }
     let keep = attr::filter(conn, project_id, &args.filter)?;
@@ -333,8 +347,8 @@ pub fn show(ctx: &Ctx, args: KeyArg) -> Result<()> {
 }
 
 pub fn edit(ctx: &Ctx, args: EditArgs) -> Result<()> {
-    let conn = &ctx.conn;
-    let item = db::item(conn, &args.key)?;
+    let tx = write_tx(&ctx.conn)?;
+    let item = db::item(&tx, &args.key)?;
     let nothing = args.title.is_none()
         && args.body.is_none()
         && args.status.is_none()
@@ -356,7 +370,6 @@ pub fn edit(ctx: &Ctx, args: EditArgs) -> Result<()> {
     if let Some(due) = &args.due {
         check_date(due)?;
     }
-    let tx = conn.unchecked_transaction()?;
     let mut sets: Vec<String> = Vec::new();
     let mut vals: Vec<SqlValue> = Vec::new();
     let mut set = |col: &str, v: SqlValue| {
@@ -403,6 +416,9 @@ pub fn edit(ctx: &Ctx, args: EditArgs) -> Result<()> {
                 return Err(err(format!("cannot unset {field}: it always has a value")));
             }
             name => {
+                if args.set.iter().any(|(k, _)| k == name) {
+                    return Err(err(format!("cannot both set and unset {name}")));
+                }
                 if !attr::unset_value(&tx, item.project_id, item.id, name)? {
                     return Err(err(format!("unknown field: {name}")));
                 }
@@ -427,7 +443,7 @@ pub fn edit(ctx: &Ctx, args: EditArgs) -> Result<()> {
     )?;
     attr::set_values(&tx, item.project_id, item.id, &args.set)?;
     tx.commit()?;
-    print_written(ctx, &get(conn, item.id)?, "updated")
+    print_written(ctx, &get(&ctx.conn, item.id)?, "updated")
 }
 
 pub fn set_status(ctx: &Ctx, args: KeyArg, status: Status) -> Result<()> {
@@ -446,10 +462,10 @@ pub fn set_status(ctx: &Ctx, args: KeyArg, status: Status) -> Result<()> {
 }
 
 pub fn rm(ctx: &Ctx, args: KeyArg) -> Result<()> {
-    let conn = &ctx.conn;
-    let r = db::item(conn, &args.key)?;
-    let item = get(conn, r.id)?;
-    let subtasks: i64 = conn.query_row(
+    let tx = write_tx(&ctx.conn)?;
+    let r = db::item(&tx, &args.key)?;
+    let item = get(&tx, r.id)?;
+    let subtasks: i64 = tx.query_row(
         "WITH RECURSIVE down(id) AS (
              SELECT ?1 UNION SELECT i.id FROM items i JOIN down ON i.parent_id = down.id
          ) SELECT count(*) - 1 FROM down",
@@ -457,7 +473,8 @@ pub fn rm(ctx: &Ctx, args: KeyArg) -> Result<()> {
         |row| row.get(0),
     )?;
     // Subtasks, values and comments go with it (ON DELETE CASCADE).
-    conn.execute("DELETE FROM items WHERE id = ?1", params![r.id])?;
+    tx.execute("DELETE FROM items WHERE id = ?1", params![r.id])?;
+    tx.commit()?;
     if ctx.json {
         return output::json(&item);
     }
@@ -466,6 +483,15 @@ pub fn rm(ctx: &Ctx, args: KeyArg) -> Result<()> {
         n => println!("deleted {} and {n} subtask(s)", item.id),
     }
     Ok(())
+}
+
+/// A transaction that takes the write lock up front, so a read-then-write cannot fail with
+/// SQLITE_BUSY_SNAPSHOT when another agent commits in between (busy_timeout does not retry that).
+fn write_tx(conn: &Connection) -> Result<Transaction<'_>> {
+    Ok(Transaction::new_unchecked(
+        conn,
+        TransactionBehavior::Immediate,
+    )?)
 }
 
 /// One item by row id.

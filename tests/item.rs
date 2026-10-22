@@ -256,6 +256,7 @@ fn list_errors() {
         .args(["--json", "list", "--status", "maybe"])
         .assert()
         .code(2);
+    assert_eq!(env.json_err(&["list", "-m", "v9"]), "no such milestone: v9");
     // --where goes through attr::filter, which rejects unknown attributes.
     env.json_err(&["list", "--where", "size=L"]);
 }
@@ -509,6 +510,10 @@ fn edit_errors() {
         env.json_err(&["edit", "APM-1", "--parent", "APM-5"]),
         "no such item: APM-5"
     );
+    assert_eq!(
+        env.json_err(&["edit", "APM-1", "--set", "size=L", "--unset", "size"]),
+        "cannot both set and unset size"
+    );
     // A failed edit changes nothing.
     env.json_err(&["edit", "APM-1", "--title", "new", "--unset", "colour"]);
     assert_eq!(env.json(&["show", "APM-1"])["title"], "a");
@@ -564,4 +569,36 @@ fn rm_errors() {
         env.json_err(&["rm", "1"])
             .contains("invalid item reference")
     );
+}
+
+// ---- concurrency
+
+#[test]
+fn concurrent_adds_get_distinct_numbers() {
+    let env = env_apm();
+    let workers: Vec<_> = (0..6)
+        .map(|w| {
+            let db = env.db_path();
+            std::thread::spawn(move || {
+                for n in 0..5 {
+                    let title = format!("w{w}-{n}");
+                    let out = std::process::Command::new(env!("CARGO_BIN_EXE_apm"))
+                        .env("APM_DB", &db)
+                        .env("APM_AGENT", "tester")
+                        .args(["--json", "add", &title, "-p", "APM"])
+                        .output()
+                        .unwrap();
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    assert!(out.status.success(), "{stderr}");
+                }
+            })
+        })
+        .collect();
+    for w in workers {
+        w.join().unwrap();
+    }
+    let mut all = ids(&env.json(&["list"]));
+    all.sort();
+    all.dedup();
+    assert_eq!(all.len(), 30);
 }
