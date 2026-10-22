@@ -12,10 +12,10 @@ fn version_prints() {
 fn db_is_created_and_migrated() {
     let env = Env::new();
     let v = env.json(&["db"]);
-    assert_eq!(v["schema_version"], 1);
+    assert_eq!(v["schema_version"], 2);
     assert!(env.db_path().exists());
     // Reopening an up-to-date database is a no-op.
-    assert_eq!(env.json(&["db"])["schema_version"], 1);
+    assert_eq!(env.json(&["db"])["schema_version"], 2);
 }
 
 #[test]

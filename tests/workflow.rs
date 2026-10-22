@@ -90,7 +90,8 @@ fn every_guide_example_runs_in_order() {
     let guide = env.json(&["guide"])["guide"].as_str().unwrap().to_string();
     let workflow = guide_examples(&guide, "WORKFLOW");
     let attrs = guide_examples(&guide, "CUSTOM ATTRIBUTES");
-    for args in workflow.iter().chain(&attrs) {
+    let statuses = guide_examples(&guide, "STATUSES");
+    for args in workflow.iter().chain(&attrs).chain(&statuses) {
         let out = env.apm().arg("--json").args(args).output().unwrap();
         assert!(
             out.status.success(),

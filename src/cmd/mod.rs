@@ -7,12 +7,13 @@ pub mod guide;
 pub mod item;
 pub mod milestone;
 pub mod project;
+pub mod status;
 
 use rusqlite::Connection;
 
 use crate::cli::{self, Cli, Command};
 use crate::error::Result;
-use crate::model::Status;
+use status::Shortcut;
 
 /// What every command gets: the open database, the output mode and the actor.
 pub struct Ctx {
@@ -37,11 +38,12 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::List(a) => item::list(&ctx, a),
         Command::Show(a) => item::show(&ctx, a),
         Command::Edit(a) => item::edit(&ctx, a),
-        Command::Start(a) => item::set_status(&ctx, a, Status::Doing),
-        Command::Done(a) => item::set_status(&ctx, a, Status::Done),
-        Command::Block(a) => item::set_status(&ctx, a, Status::Blocked),
+        Command::Start(a) => item::set_status(&ctx, a, Shortcut::Start),
+        Command::Done(a) => item::set_status(&ctx, a, Shortcut::Done),
+        Command::Block(a) => item::set_status(&ctx, a, Shortcut::Block),
         Command::Rm(a) => item::rm(&ctx, a),
         Command::Milestone(c) => milestone::run(&ctx, c),
+        Command::Status(c) => status::run(&ctx, c),
         Command::Attr(c) => attr::run(&ctx, c),
         Command::Comment(a) => comment::run(&ctx, a),
         Command::Db => db::run(&ctx, &path),

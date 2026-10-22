@@ -1,13 +1,12 @@
 //! Projects: a KEY, a name and a description. Tasks live in a project.
 
-use clap::{Subcommand, ValueEnum};
+use clap::Subcommand;
 use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 use serde::{Serialize, Serializer};
 
-use super::Ctx;
+use super::{Ctx, status};
 use crate::db;
 use crate::error::{Result, err};
-use crate::model::Status;
 use crate::output;
 
 #[derive(Subcommand, Debug)]
@@ -52,8 +51,8 @@ struct Detail {
     counts: Counts,
 }
 
-/// Task counts per status, in `Status` order (a JSON object).
-struct Counts(Vec<(&'static str, i64)>);
+/// Task counts per status, in the project's status order (a JSON object).
+struct Counts(Vec<(String, i64)>);
 
 impl Serialize for Counts {
     fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
@@ -89,14 +88,17 @@ fn check_name(name: &str) -> Result<()> {
 fn add(ctx: &Ctx, key: &str, name: &str, description: Option<&str>) -> Result<()> {
     let key = db::check_project_key(key)?;
     check_name(name)?;
+    let tx = Transaction::new_unchecked(&ctx.conn, TransactionBehavior::Immediate)?;
     db::unique(
-        ctx.conn.execute(
+        tx.execute(
             "INSERT INTO projects (key, name, description) VALUES (?1, ?2, ?3)",
             params![key, name, description.unwrap_or("")],
         ),
         || err(format!("project already exists: {key}")),
     )?;
-    let id = ctx.conn.last_insert_rowid();
+    let id = tx.last_insert_rowid();
+    status::seed(&tx, id)?;
+    tx.commit()?;
     let project = get(&ctx.conn, id)?;
     output::written(ctx.json, &project, &format!("created {}", project.key))
 }
@@ -171,7 +173,7 @@ fn rm(ctx: &Ctx, key: &str) -> Result<()> {
     let tx = Transaction::new_unchecked(&ctx.conn, TransactionBehavior::Immediate)?;
     let id = db::project_id(&tx, key)?;
     let project = get(&tx, id)?;
-    // Milestones, tasks, attributes, values and comments go with it (ON DELETE CASCADE).
+    // Statuses, milestones, tasks and everything on them go with it (ON DELETE CASCADE).
     tx.execute("DELETE FROM projects WHERE id = ?1", params![id])?;
     tx.commit()?;
     output::written(ctx.json, &project, &format!("deleted {}", project.key))
@@ -194,16 +196,16 @@ pub fn get(conn: &Connection, id: i64) -> Result<Project> {
     )?)
 }
 
-/// Task counts (subtasks included) for every status, zeros included.
+/// Task counts (subtasks included) for every status of the project, zeros included.
 fn counts(conn: &Connection, project_id: i64) -> Result<Counts> {
-    let mut stmt =
-        conn.prepare("SELECT count(*) FROM items WHERE project_id = ?1 AND status = ?2")?;
-    let counts = Status::value_variants()
-        .iter()
-        .map(|s| {
-            let n = stmt.query_row(params![project_id, s.as_str()], |r| r.get(0))?;
-            Ok((s.as_str(), n))
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let mut stmt = conn.prepare(
+        "SELECT s.name, count(i.id) FROM statuses s
+         LEFT JOIN items i ON i.status_id = s.id
+         WHERE s.project_id = ?1
+         GROUP BY s.id ORDER BY s.position, s.id",
+    )?;
+    let counts = stmt
+        .query_map(params![project_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(Counts(counts))
 }

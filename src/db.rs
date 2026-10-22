@@ -41,7 +41,8 @@ pub fn open(path: &Path) -> Result<Connection> {
 
 /// Schema migrations, applied in order. `PRAGMA user_version` = number applied.
 /// Never edit a released entry; append a new one.
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE projects (
     id          INTEGER PRIMARY KEY,
     key         TEXT NOT NULL UNIQUE,
@@ -111,7 +112,98 @@ CREATE TABLE comments (
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 CREATE INDEX comments_item ON comments(item_id);
-"#];
+"#,
+    // v2: per-project statuses (items.status text -> status_id), history, links, tags, aliases.
+    // Rebuilds `items` (SQLite cannot drop its CHECK): `migrate` turns foreign keys off around
+    // it and runs `foreign_key_check` before commit, per SQLite's 12-step ALTER procedure.
+    r#"
+CREATE TABLE statuses (
+    id         INTEGER PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    category   TEXT NOT NULL CHECK (category IN ('todo', 'active', 'done', 'cancelled')),
+    position   INTEGER NOT NULL,
+    UNIQUE (project_id, name COLLATE NOCASE)
+);
+INSERT INTO statuses (project_id, name, category, position)
+    SELECT p.id, d.column1, d.column2, d.column3
+    FROM projects p,
+         (VALUES ('todo', 'todo', 1), ('doing', 'active', 2), ('blocked', 'active', 3),
+                 ('done', 'done', 4), ('cancelled', 'cancelled', 5)) d;
+
+CREATE TABLE new_items (
+    id           INTEGER PRIMARY KEY,
+    project_id   INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    seq          INTEGER NOT NULL,
+    parent_id    INTEGER REFERENCES new_items(id) ON DELETE CASCADE,
+    milestone_id INTEGER REFERENCES milestones(id) ON DELETE SET NULL,
+    title        TEXT NOT NULL,
+    body         TEXT NOT NULL DEFAULT '',
+    status_id    INTEGER NOT NULL REFERENCES statuses(id),
+    priority     TEXT NOT NULL DEFAULT 'none'
+                 CHECK (priority IN ('none', 'low', 'medium', 'high', 'urgent')),
+    assignee     TEXT,
+    due          TEXT,
+    created_by   TEXT NOT NULL,
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    UNIQUE (project_id, seq)
+);
+INSERT INTO new_items (id, project_id, seq, parent_id, milestone_id, title, body, status_id,
+                       priority, assignee, due, created_by, created_at, updated_at)
+    SELECT i.id, i.project_id, i.seq, i.parent_id, i.milestone_id, i.title, i.body,
+           (SELECT s.id FROM statuses s WHERE s.project_id = i.project_id AND s.name = i.status),
+           i.priority, i.assignee, i.due, i.created_by, i.created_at, i.updated_at
+    FROM items i;
+DROP TABLE items;
+ALTER TABLE new_items RENAME TO items;
+CREATE INDEX items_parent ON items(parent_id);
+CREATE INDEX items_milestone ON items(milestone_id);
+CREATE INDEX items_status ON items(status_id);
+
+CREATE TABLE events (
+    id      INTEGER PRIMARY KEY,
+    item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    actor   TEXT NOT NULL,
+    at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    kind    TEXT NOT NULL,
+    field   TEXT,
+    old     TEXT,
+    new     TEXT
+);
+CREATE INDEX events_item ON events(item_id);
+
+CREATE TABLE links (
+    from_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    to_id   INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    kind    TEXT NOT NULL CHECK (kind IN ('blocks', 'relates', 'duplicates')),
+    PRIMARY KEY (from_id, to_id, kind),
+    CHECK (from_id != to_id)
+);
+CREATE INDEX links_to ON links(to_id);
+
+CREATE TABLE tags (
+    item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    tag     TEXT NOT NULL,
+    PRIMARY KEY (item_id, tag)
+);
+CREATE INDEX tags_tag ON tags(tag);
+
+CREATE TABLE project_aliases (
+    key        TEXT PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE
+);
+CREATE INDEX project_aliases_project ON project_aliases(project_id);
+
+CREATE TABLE item_aliases (
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    seq        INTEGER NOT NULL,
+    item_id    INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    PRIMARY KEY (project_id, seq)
+);
+CREATE INDEX item_aliases_item ON item_aliases(item_id);
+"#,
+];
 
 pub fn schema_version(conn: &Connection) -> Result<i64> {
     Ok(conn.pragma_query_value(None, "user_version", |r| r.get(0))?)
@@ -125,12 +217,57 @@ fn migrate(conn: &mut Connection) -> Result<()> {
             MIGRATIONS.len()
         )));
     }
+    if current == MIGRATIONS.len() {
+        return Ok(());
+    }
+    // Table rebuilds drop and recreate parents of foreign keys: with enforcement on, the DROP
+    // would cascade-delete their children. The pragma is a no-op inside a transaction, so it
+    // is switched here and every migration checks the keys itself before committing.
+    conn.pragma_update(None, "foreign_keys", "OFF")?;
+    let res = apply(conn, current);
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    res
+}
+
+fn apply(conn: &mut Connection, current: usize) -> Result<()> {
     for (i, sql) in MIGRATIONS.iter().enumerate().skip(current) {
         let tx = conn.transaction()?;
         tx.execute_batch(sql)?;
+        let broken: bool = tx.query_row(
+            "SELECT count(*) > 0 FROM pragma_foreign_key_check",
+            [],
+            |r| r.get(0),
+        )?;
+        if broken {
+            return Err(err(format!(
+                "migration to schema v{} broke foreign keys",
+                i + 1
+            )));
+        }
         tx.pragma_update(None, "user_version", (i + 1) as i64)?;
         tx.commit()?;
     }
+    Ok(())
+}
+
+/// Record one history event on a task. Call it inside the mutation's transaction.
+/// Kinds: `created` (new = title); `changed` (field = a built-in field, old/new as shown:
+/// status name, milestone name, parent KEY-N; None = empty); `attr` (field = attribute name,
+/// old/new = stored values, None = unset); `commented` (new = comment text).
+pub fn record_event(
+    conn: &Connection,
+    item_id: i64,
+    actor: &str,
+    kind: &str,
+    field: Option<&str>,
+    old: Option<&str>,
+    new: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO events (item_id, actor, kind, field, old, new)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![item_id, actor, kind, field, old, new],
+    )?;
     Ok(())
 }
 

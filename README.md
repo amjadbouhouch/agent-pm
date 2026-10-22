@@ -47,6 +47,7 @@ Data lives in `~/.agent-pm/apm.db`; override with `--db PATH` or `$APM_DB`.
 | `project add\|list\|show\|edit\|rm` | Projects, each with a short KEY (`APM`) |
 | `add`, `list`, `show`, `edit`, `rm` | Tasks and subtasks, referenced as `KEY-N` |
 | `start`, `done`, `block` | Status shortcuts |
+| `status list\|add\|edit\|rm` | Custom statuses per project, each in a category (todo, active, done, cancelled) |
 | `milestone add\|list\|show\|edit\|close\|reopen\|rm` | Milestones with progress |
 | `attr add\|list\|rm` | Custom attributes (text, number, select, date, checkbox), set with `--set`, filtered with `--where` |
 | `comment KEY-N TEXT` | Comment on a task |
@@ -60,6 +61,11 @@ for every flag.
 
 Every item comes with a set of **default attributes** (title, status, priority,
 assignee, due date, milestone, parent, created/updated timestamps).
+
+Statuses are per project too: every project starts with todo, doing, blocked, done and
+cancelled, and can add, rename, reorder or remove its own ("brainstorming", "needs
+re-work", ...). Each status belongs to a category (todo, active, done, cancelled), which
+decides what `list` hides, how milestone progress counts, and where `start`/`done` go.
 
 On top of those, a project can declare **custom attributes** when it needs more —
 Notion-style properties such as text, number, select, date, or checkbox — without

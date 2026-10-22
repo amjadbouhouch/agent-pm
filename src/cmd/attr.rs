@@ -416,8 +416,10 @@ mod tests {
         conn.execute_batch(
             r#"
             INSERT INTO projects (id, key, name) VALUES (1, 'P', 'p'), (2, 'Q', 'q');
-            INSERT INTO items (id, project_id, seq, title, created_by)
-                VALUES (1, 1, 1, 'a', 't'), (2, 1, 2, 'b', 't'), (3, 2, 1, 'c', 't');
+            INSERT INTO statuses (id, project_id, name, category, position)
+                VALUES (1, 1, 'todo', 'todo', 1), (2, 2, 'todo', 'todo', 1);
+            INSERT INTO items (id, project_id, seq, title, status_id, created_by)
+                VALUES (1, 1, 1, 'a', 1, 't'), (2, 1, 2, 'b', 1, 't'), (3, 2, 1, 'c', 2, 't');
             INSERT INTO attributes (project_id, name, type, options) VALUES
                 (1, 'note', 'text', '[]'),
                 (1, 'points', 'number', '[]'),

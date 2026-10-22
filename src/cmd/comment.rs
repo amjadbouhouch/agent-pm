@@ -51,6 +51,15 @@ pub fn run(ctx: &Ctx, args: CommentArgs) -> Result<()> {
         params![item.id, ctx.actor, args.text],
     )?;
     let id = tx.last_insert_rowid();
+    db::record_event(
+        &tx,
+        item.id,
+        &ctx.actor,
+        "commented",
+        None,
+        None,
+        Some(&args.text),
+    )?;
     tx.execute(
         &format!(
             "UPDATE items SET updated_at = {} WHERE id = ?1",

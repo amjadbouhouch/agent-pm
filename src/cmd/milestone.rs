@@ -80,7 +80,8 @@ pub struct Milestone {
     pub updated_at: String,
 }
 
-/// `total` counts tasks that are not cancelled; `done` and `cancelled` count those statuses.
+/// By status category: `total` counts tasks that are not cancelled; `done` and `cancelled`
+/// count tasks in done- and cancelled-category statuses.
 #[derive(Serialize, Debug)]
 pub struct Progress {
     pub total: i64,
@@ -134,12 +135,13 @@ pub fn resolve(conn: &Connection, project_id: i64, name: &str) -> Result<i64> {
 pub fn load(conn: &Connection, id: i64) -> Result<Milestone> {
     Ok(conn.query_row(
         "SELECT m.id, m.name, p.key, m.description, m.due, m.status, m.created_at, m.updated_at,
-                COUNT(i.id) - COUNT(CASE WHEN i.status = 'cancelled' THEN 1 END),
-                COUNT(CASE WHEN i.status = 'done' THEN 1 END),
-                COUNT(CASE WHEN i.status = 'cancelled' THEN 1 END)
+                COUNT(i.id) - COUNT(CASE WHEN s.category = 'cancelled' THEN 1 END),
+                COUNT(CASE WHEN s.category = 'done' THEN 1 END),
+                COUNT(CASE WHEN s.category = 'cancelled' THEN 1 END)
          FROM milestones m
          JOIN projects p ON p.id = m.project_id
          LEFT JOIN items i ON i.milestone_id = m.id
+         LEFT JOIN statuses s ON s.id = i.status_id
          WHERE m.id = ?1
          GROUP BY m.id",
         params![id],
@@ -244,7 +246,9 @@ fn list(ctx: &Ctx, project: &str, all: bool) -> Result<()> {
 fn show(ctx: &Ctx, project: &str, name: &str) -> Result<()> {
     let m = load(&ctx.conn, find(&ctx.conn, project, name)?)?;
     let mut stmt = ctx.conn.prepare(
-        "SELECT seq, status, title, assignee FROM items WHERE milestone_id = ?1 ORDER BY seq",
+        "SELECT i.seq, s.name, i.title, i.assignee FROM items i
+         JOIN statuses s ON s.id = i.status_id
+         WHERE i.milestone_id = ?1 ORDER BY i.seq",
     )?;
     let items = stmt
         .query_map(params![m.id], |r| {
