@@ -673,6 +673,7 @@ fn text_output_is_ascii() {
         &["list", "--search", "école", "--all"],
         &["show", "APM-1"],
         &["show", "APM-2"],
+        &["show", "APM-1", "--tree"],
         &["tags"],
         &["history", "APM-1"],
         &["history", "APM-2"],
