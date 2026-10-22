@@ -28,6 +28,7 @@ WORKFLOW
   apm list -p APM --status done,cancelled            # explicit statuses
   apm list -m v1 --all                               # include done/cancelled
   apm show APM-1                                     # fields, subtasks, attrs, comments
+  apm show APM-1 --tree                              # the task and all its subtasks
   apm edit APM-1 --priority urgent --unset due
   apm milestone list -p APM                          # progress done/total
   apm milestone close v1 -p APM

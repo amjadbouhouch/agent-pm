@@ -22,6 +22,15 @@ pub struct KeyArg {
 }
 
 #[derive(Args, Debug)]
+pub struct ShowArgs {
+    /// Task id, e.g. APM-12
+    pub key: String,
+    /// Only the task and all its subtasks, as an indented tree (JSON: nested `subtasks`)
+    #[arg(long)]
+    pub tree: bool,
+}
+
+#[derive(Args, Debug)]
 pub struct AddArgs {
     pub title: String,
     /// Project key (optional with --parent: the parent's project is used)
@@ -151,8 +160,18 @@ struct Detail {
     #[serde(flatten)]
     item: Item,
     links: link::Links,
-    subtasks: Vec<Item>,
+    subtasks: Vec<Node>,
     comments: Vec<comment::Comment>,
+}
+
+/// A subtask in `show`. With `--tree` it carries its own subtasks, recursively; without,
+/// it is a plain item.
+#[derive(Serialize)]
+struct Node {
+    #[serde(flatten)]
+    item: Item,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subtasks: Option<Vec<Node>>,
 }
 
 const SELECT: &str = "
@@ -334,25 +353,48 @@ pub fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
                 i.priority.clone(),
                 dash(&i.assignee),
                 dash(&i.due),
+                dash(&i.milestone),
                 title,
             ]
         })
         .collect();
-    output::table(&["ID", "STATUS", "PRI", "ASSIGNEE", "DUE", "TITLE"], &rows);
+    output::table(
+        &["ID", "STATUS", "PRI", "ASSIGNEE", "DUE", "MS", "TITLE"],
+        &rows,
+    );
     Ok(())
 }
 
-pub fn show(ctx: &Ctx, args: KeyArg) -> Result<()> {
+pub fn show(ctx: &Ctx, args: ShowArgs) -> Result<()> {
     let conn = &ctx.conn;
     let r = db::item(conn, &args.key)?;
+    let subtasks = if args.tree {
+        subtree(conn, r.id)?
+    } else {
+        query(conn, "i.parent_id = ?1", &[r.id.into()])?
+            .into_iter()
+            .map(|item| Node {
+                item,
+                subtasks: None,
+            })
+            .collect()
+    };
     let detail = Detail {
         item: get(conn, r.id)?,
         links: link::for_item(conn, r.id)?,
-        subtasks: query(conn, "i.parent_id = ?1", &[r.id.into()])?,
+        subtasks,
         comments: comment::for_item(conn, r.id)?,
     };
     if ctx.json {
         return output::json(&detail);
+    }
+    if args.tree {
+        let mut rows = Vec::new();
+        tree_rows(&detail.item, &detail.subtasks, 0, &mut rows);
+        for line in output::aligned(&rows) {
+            println!("{line}");
+        }
+        return Ok(());
     }
     let i = &detail.item;
     println!("{}  {}", i.id, i.title);
@@ -386,16 +428,27 @@ pub fn show(ctx: &Ctx, args: KeyArg) -> Result<()> {
     for (label, linked) in detail.links.groups() {
         if !linked.is_empty() {
             println!("\n{label}:");
-            for l in linked {
-                println!("  {}  {}  {}", l.id, l.status, l.title);
-            }
+            let rows: Vec<Vec<String>> = linked
+                .iter()
+                .map(|l| vec![l.id.clone(), l.status.clone(), l.title.clone()])
+                .collect();
+            print_indented(&rows);
         }
     }
     if !detail.subtasks.is_empty() {
         println!("\nsubtasks:");
-        for s in &detail.subtasks {
-            println!("  {}  {}  {}", s.id, s.status, s.title);
-        }
+        let rows: Vec<Vec<String>> = detail
+            .subtasks
+            .iter()
+            .map(|s| {
+                vec![
+                    s.item.id.clone(),
+                    s.item.status.clone(),
+                    s.item.title.clone(),
+                ]
+            })
+            .collect();
+        print_indented(&rows);
     }
     if !detail.comments.is_empty() {
         println!("\ncomments:");
@@ -556,6 +609,37 @@ pub fn rm(ctx: &Ctx, args: KeyArg) -> Result<()> {
         n => format!("deleted {} and {n} subtask(s)", item.id),
     };
     output::written(ctx.json, &item, &line)
+}
+
+/// Rows printed as aligned columns, indented by two spaces.
+fn print_indented(rows: &[Vec<String>]) {
+    for line in output::aligned(rows) {
+        println!("  {line}");
+    }
+}
+
+/// A task's subtasks, each with its own subtasks, recursively (by number).
+fn subtree(conn: &Connection, id: i64) -> Result<Vec<Node>> {
+    query(conn, "i.parent_id = ?1", &[id.into()])?
+        .into_iter()
+        .map(|item| {
+            let subtasks = Some(subtree(conn, item.row_id)?);
+            Ok(Node { item, subtasks })
+        })
+        .collect()
+}
+
+/// `show --tree` rows: id (indented two spaces per level), status, title.
+fn tree_rows(item: &Item, subtasks: &[Node], depth: usize, rows: &mut Vec<Vec<String>>) {
+    rows.push(vec![
+        format!("{}{}", "  ".repeat(depth), item.id),
+        item.status.clone(),
+        item.title.clone(),
+    ]);
+    for node in subtasks {
+        let children = node.subtasks.as_deref().unwrap_or_default();
+        tree_rows(&node.item, children, depth + 1, rows);
+    }
 }
 
 /// One item by row id.

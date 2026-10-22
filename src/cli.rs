@@ -33,8 +33,8 @@ pub enum Command {
     Add(item::AddArgs),
     /// List tasks (open ones unless --all)
     List(item::ListArgs),
-    /// Show one task with its subtasks, attributes and comments
-    Show(item::KeyArg),
+    /// Show one task with its subtasks, attributes and comments (--tree: all subtasks)
+    Show(item::ShowArgs),
     /// Change a task
     Edit(item::EditArgs),
     /// Move a task to its project's first active status (default: doing)

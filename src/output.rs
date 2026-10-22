@@ -26,31 +26,59 @@ pub fn print_error(e: &AppError, json: bool) {
     }
 }
 
-/// Print rows as left-aligned columns separated by two spaces. Prints nothing for no rows.
+/// Print rows as left-aligned columns separated by two spaces, under a header line.
+/// Prints nothing for no rows.
 pub fn table(headers: &[&str], rows: &[Vec<String>]) {
     if rows.is_empty() {
         return;
     }
-    let mut widths: Vec<usize> = headers.iter().map(|h| h.chars().count()).collect();
+    let mut all = vec![headers.iter().map(|h| h.to_string()).collect()];
+    all.extend_from_slice(rows);
+    for line in aligned(&all) {
+        println!("{line}");
+    }
+}
+
+/// Rows as lines of left-aligned columns separated by two spaces (the last column is not
+/// padded). For tables without a header, e.g. the subtasks in `show`.
+pub fn aligned(rows: &[Vec<String>]) -> Vec<String> {
+    let mut widths: Vec<usize> = Vec::new();
     for row in rows {
         for (i, cell) in row.iter().enumerate() {
-            widths[i] = widths[i].max(cell.chars().count());
-        }
-    }
-    let line = |cells: Vec<&str>| {
-        let last = cells.len() - 1;
-        let mut out = String::new();
-        for (i, cell) in cells.iter().enumerate() {
-            if i == last {
-                out.push_str(cell);
-            } else {
-                out.push_str(&format!("{:<w$}  ", cell, w = widths[i]));
+            let w = cell.chars().count();
+            match widths.get_mut(i) {
+                Some(max) => *max = (*max).max(w),
+                None => widths.push(w),
             }
         }
-        println!("{}", out.trim_end());
-    };
-    line(headers.to_vec());
-    for row in rows {
-        line(row.iter().map(String::as_str).collect());
+    }
+    rows.iter()
+        .map(|row| {
+            let last = row.len().saturating_sub(1);
+            let mut out = String::new();
+            for (i, cell) in row.iter().enumerate() {
+                if i == last {
+                    out.push_str(cell);
+                } else {
+                    out.push_str(&format!("{:<w$}  ", cell, w = widths[i]));
+                }
+            }
+            out.trim_end().to_string()
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aligned_pads_all_but_the_last_column() {
+        let rows = vec![
+            vec!["APM-5".to_string(), "doing".to_string(), "a".to_string()],
+            vec!["APM-10".to_string(), "todo".to_string(), "b c".to_string()],
+        ];
+        assert_eq!(aligned(&rows), ["APM-5   doing  a", "APM-10  todo   b c"]);
+        assert!(aligned(&[]).is_empty());
     }
 }

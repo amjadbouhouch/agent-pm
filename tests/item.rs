@@ -264,6 +264,7 @@ fn list_errors() {
 fn list_text_table() {
     let env = env_apm();
     assert_eq!(text(&env, &["list"]), "");
+    seed_milestone(&env, "APM", "v1");
     env.json(&[
         "add",
         "parent",
@@ -273,17 +274,25 @@ fn list_text_table() {
         "alice",
         "--due",
         "2026-11-01",
+        "-m",
+        "v1",
     ]);
     env.json(&["add", "child", "--parent", "APM-1"]);
     let out = text(&env, &["list"]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 3);
     let headers: Vec<&str> = lines[0].split_whitespace().collect();
-    assert_eq!(headers, ["ID", "STATUS", "PRI", "ASSIGNEE", "DUE", "TITLE"]);
+    assert_eq!(
+        headers,
+        ["ID", "STATUS", "PRI", "ASSIGNEE", "DUE", "MS", "TITLE"]
+    );
     assert!(lines[1].starts_with("APM-1  todo"));
     assert!(lines[1].contains("alice"));
-    assert!(lines[1].contains("2026-11-01"));
+    assert!(lines[1].contains("2026-11-01  v1"));
     assert!(lines[1].ends_with("parent"));
+    // No milestone: a dash in the MS column.
+    let cells: Vec<&str> = lines[2].split_whitespace().collect();
+    assert_eq!(cells[5], "-");
     assert!(lines[2].ends_with("APM-1 > child"));
 }
 
@@ -313,6 +322,57 @@ fn show_includes_subtasks_and_comments() {
     assert!(out.contains("\nthe body\n"));
     assert!(out.contains("  APM-2  done  child\n"));
     assert!(out.contains("alice: looks good\n"));
+}
+
+#[test]
+fn show_aligns_subtask_lines() {
+    let env = env_apm();
+    env.json(&["add", "parent", "-p", "APM"]);
+    env.json(&["add", "a", "--parent", "APM-1", "--status", "doing"]);
+    for t in ["b", "c", "d", "e", "f", "g", "h", "i"] {
+        env.json(&["add", t, "-p", "APM"]);
+    }
+    env.json(&["add", "j", "--parent", "APM-1"]);
+    let out = text(&env, &["show", "APM-1"]);
+    let subtasks: Vec<&str> = out
+        .lines()
+        .skip_while(|l| *l != "subtasks:")
+        .skip(1)
+        .collect();
+    assert_eq!(subtasks, ["  APM-2   doing  a", "  APM-11  todo   j"]);
+}
+
+#[test]
+fn show_tree_nests_every_level() {
+    let env = env_apm();
+    env.json(&["add", "root", "-p", "APM"]);
+    env.json(&["add", "a", "--parent", "APM-1", "--status", "doing"]);
+    env.json(&["add", "a1", "--parent", "APM-2"]);
+    env.json(&["add", "b", "--parent", "APM-1", "--status", "done"]);
+    env.json(&["add", "a1x", "--parent", "APM-3"]);
+    assert_eq!(
+        text(&env, &["show", "APM-1", "--tree"]),
+        "APM-1        todo   root\n  APM-2      doing  a\n    APM-3    todo   a1\n      APM-5  todo   a1x\n  APM-4      done   b\n"
+    );
+    let v = env.json(&["show", "APM-1", "--tree"]);
+    assert_eq!(v["id"], "APM-1");
+    assert_eq!(ids(&v["subtasks"]), ["APM-2", "APM-4"]);
+    assert_eq!(ids(&v["subtasks"][0]["subtasks"]), ["APM-3"]);
+    assert_eq!(
+        v["subtasks"][0]["subtasks"][0]["subtasks"][0]["id"],
+        "APM-5"
+    );
+    // Leaves have an empty list; links and comments are there as in plain show.
+    assert_eq!(v["subtasks"][1]["subtasks"], serde_json::json!([]));
+    assert!(v["comments"].is_array());
+    // Without --tree, subtasks are plain items (no nested `subtasks` key).
+    let plain = env.json(&["show", "APM-1"]);
+    assert!(plain["subtasks"][0].get("subtasks").is_none());
+    // A task without subtasks is a one-line tree.
+    assert_eq!(
+        text(&env, &["show", "APM-5", "--tree"]),
+        "APM-5  todo  a1x\n"
+    );
 }
 
 #[test]
