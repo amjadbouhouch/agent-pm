@@ -1,4 +1,4 @@
-//! Long text from the command line, stdin or a file: task bodies and comments.
+//! Long text from the command line, stdin or a file: task bodies, comments, import files.
 
 use std::io::{IsTerminal, Read};
 use std::path::Path;
@@ -25,6 +25,12 @@ pub const COMMENT: Flags = Flags {
     stdin: "comment KEY-N -",
     file: "--file",
     empty: "comment text cannot be empty",
+};
+
+pub const IMPORT: Flags = Flags {
+    stdin: "import -",
+    file: "import FILE",
+    empty: "import file is empty",
 };
 
 /// Text given inline, as `-` (read stdin) or from a file; None when neither is given.

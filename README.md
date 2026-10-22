@@ -22,6 +22,7 @@ prints stable JSON, so agents can parse it; without it, output is short plain te
 - Tags, filtered with `list --tag`, counted with `apm tags`
 - Search (titles, bodies, comments), multi-key sort, limit
 - History: every change to a task, who made it and when
+- Export/import projects as JSON (same task ids and history), and one-command backups
 - Move tasks and re-key projects (old ids keep resolving); rename statuses, milestones and
   attributes
 
@@ -108,6 +109,7 @@ task or `release` drops it early, `claim --steal` takes over someone else's, and
 | `link\|unlink A KIND B` | Links between tasks, also across projects: `blocks` (no cycles), `relates`, `duplicates` |
 | `tags`, `add/edit --tag`, `edit --untag` | Lowercase tags and their counts |
 | `history KEY-N` | A task's change history, oldest first |
+| `export`, `import FILE\|-`, `backup [PATH]` | Projects as JSON, back in another database; a copy of the database |
 | `guide` | Compact usage guide for agents |
 | `db` | Database path and schema version |
 
@@ -142,6 +144,28 @@ Due dates (tasks and milestones) and `datetime` attributes take a date (`2026-11
 date-time with a zone (`2026-11-20T17:00+01:00`, `...Z`), stored in UTC. Date-times without a
 zone are rejected. In `list --due-before/--due-after`, a date bound compares the UTC date
 part of a due; `--overdue` is open tasks due before now (date dues: before today, UTC).
+
+## Backup and move data
+
+`apm backup` copies the whole database, safely while agents write to it, to
+`~/.agent-pm/backups/apm-<UTC time>.db` (or `backups/` next to a `--db`/`$APM_DB` file) and
+prints the path; `--keep 7` then deletes all but the 7 newest backups it made there (other
+files are left alone). Pass a path to write elsewhere. A backup is a normal database:
+`apm --db <backup> list` reads it.
+
+To move projects to another machine or database, export them and import the file:
+
+```sh
+apm export -p APM -o apm.json        # all projects without -p; stdout without -o
+apm --db other.db import apm.json    # or: apm export | apm --db other.db import -
+apm import apm.json --key APM2       # a one-project file under another key
+```
+
+The file is versioned JSON (`"apm_export": 1`) with each project's statuses, milestones,
+attributes and tasks (same `KEY-N`, values, tags, comments, history) and the links between
+exported tasks. Import is all or nothing: it checks the whole file first, refuses a key that
+already exists, and `--dry-run` shows what it would create. Old-id aliases and comment ids are
+not carried over.
 
 ## License
 

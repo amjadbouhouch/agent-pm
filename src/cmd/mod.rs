@@ -10,6 +10,7 @@ pub mod item;
 pub mod link;
 pub mod milestone;
 pub mod mv;
+pub mod port;
 pub mod project;
 pub mod status;
 pub mod tag;
@@ -61,6 +62,9 @@ pub fn run(cli: Cli) -> Result<i32> {
         Command::Unlink(a) => link::unlink(&ctx, a),
         Command::Tags(a) => tag::run(&ctx, a),
         Command::History(a) => history::run(&ctx, a),
+        Command::Export(a) => port::export(&ctx, a),
+        Command::Import(a) => port::import(&ctx, a),
+        Command::Backup(a) => port::backup(&ctx, &path, a),
         Command::Db => db::run(&ctx, &path),
         Command::Guide => unreachable!("handled before opening the database"),
     };

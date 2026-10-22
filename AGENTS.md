@@ -41,12 +41,13 @@ src/cmd/<group>.rs one module per command group: its clap args, its `run`, and
                    project, item (add/list/show/edit/rm + shortcuts), milestone, attr,
                    comment, status (custom statuses), link (link/unlink, blockers),
                    tag (tags, `apm tags`), history (`apm history`), mv (`apm move`),
-                   claim (claim/release/next/claims; live claims), guide (+ guide.txt), db
+                   claim (claim/release/next/claims; live claims),
+                   port (export/import/backup), guide (+ guide.txt), db
 src/db.rs          db path, schema migrations, SQL functions, shared lookups (project_id,
                    item KEY-N, current_key), record_event
 src/model.rs       Category, Priority, name=value parsing, date and date-time (`parse_when`)
 src/output.rs      JSON printing, errors, text tables
-src/input.rs       long text from stdin or a file (bodies, comments): UTF-8, BOM, no tty
+src/input.rs       long text from stdin or a file (bodies, comments, import): UTF-8, BOM, no tty
 tests/             integration tests (run the real binary on a temp DB)
 install.sh         installer for release binaries (POSIX sh)
 scripts/           version-updater.cjs for commit-and-tag-version
@@ -81,6 +82,35 @@ scripts/           version-updater.cjs for commit-and-tag-version
 - Tests: every command gets integration tests in `tests/<group>.rs` using `tests/common`
   (`Env::new()`, `env.json(&[...])`, `env.json_err(&[...])`). Test behaviour through the CLI,
   JSON output first. Pure helpers get unit tests next to them.
+
+## Export format
+
+`apm export` writes, and `apm import` reads, this JSON (`cmd/port.rs`). It is a contract:
+any change to its shape bumps `apm_export` (and import keeps reading the old version). A
+schema change decides whether its new columns are exported; claims and aliases are not.
+Unknown fields are rejected. Field order is fixed, so the same data exports to the same text.
+
+```
+{ "apm_export": 1, "exported_at": TIME,
+  "projects": [                                   by key
+    { "key", "name", "description", "next_seq", "created_at", "updated_at",
+      "statuses":   [{"name", "category"}],                         by position
+      "milestones": [{"name", "description", "due"|null, "status", "created_at",
+                      "updated_at"}],                               by creation
+      "attributes": [{"name", "type", "options": [..], "created_at"}],  by creation
+      "tasks": [                                                    by number
+        { "id": "KEY-N", "parent": "KEY-N"|null, "title", "body", "status" (name),
+          "priority", "assignee"|null, "due"|null, "milestone" (name)|null,
+          "created_by", "created_at", "updated_at",
+          "values": {attribute name: stored text},                  by name
+          "tags": [..],                                             sorted
+          "comments": [{"author", "body", "created_at"}],           oldest first
+          "events": [{"actor", "at", "kind", "field", "old", "new"}] } ] } ],  oldest first
+  "links": [{"from": "KEY-N", "kind", "to": "KEY-N"}] }  both ends exported; by from, kind, to
+```
+
+Values are as stored (`yes` is `"true"`, dates in UTC). Import re-validates everything as the
+commands would, keeps `KEY-N`, timestamps and actors, and writes in one transaction.
 
 ## Workflow
 

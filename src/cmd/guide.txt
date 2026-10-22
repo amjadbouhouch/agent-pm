@@ -66,6 +66,11 @@ MOVE AND RENAME (old task ids and project keys keep resolving)
   apm project edit OPS --key INFRA                   # OPS-1 is now INFRA-1
   apm attr edit points -p APM --rename estimate
 
+EXPORT, IMPORT, BACKUP
+  apm export -p APM -o apm.json                      # versioned JSON; no -p = all projects
+  apm import apm.json --key NEW --dry-run            # same KEY-N and history; all or nothing
+  apm backup --keep 7                                # copy to backups/ next to the db
+
 SEARCH, SORT, DUE
   apm edit APM-1 --due 2026-11-20T17:00+01:00        # date or date-time; stored in UTC
   apm list --search "clap" --sort -priority,due --limit 5   # title, body, comments
@@ -93,9 +98,8 @@ VALUES
   Checkbox: true/false/yes/no/1/0. Date attributes: YYYY-MM-DD; datetime: like due.
   `list` hides done/cancelled-category tasks unless --all or --status.
   Blocked: open, with an open blocker or in a status named blocked; else --ready.
-  Next:     your own claimed task first (renewed); else a ready task not claimed by another
-            agent, unassigned or yours (or its lapsed claimant's); highest priority, then
-            soonest due, then id. A claim expires on its own; closing a task drops it.
+  Next:     your claimed task first; else ready, unclaimed, unassigned/yours/lapsed claimant's,
+            by priority, due, id. Claims expire on their own; closing a task drops its claim.
 
 COMMANDS
   project add|list|show|edit|rm   manage projects (edit --key re-keys; rm deletes all in it)
@@ -106,12 +110,11 @@ COMMANDS
   tags | history KEY-N            tag counts (-p KEY); a task's events (--limit N)
   start | done | block            status shortcuts
   move KEY-N PROJECT              move a task and its subtasks, renumbered in PROJECT
-  next | claim | release KEY-N    claim work (--ttl; claim --steal, release --force)
-  claims                          live claims (-p KEY, --mine); list --claimed/--unclaimed
+  next | claim | release | claims  claim work: --ttl, --steal, --force; claims -p --mine
   status list|add|edit|rm         custom statuses, -p KEY; a project keeps at least one
   milestone add|list|show|edit|close|reopen|rm   -p KEY; rm keeps its tasks
   attr add|edit|list|rm           custom attributes, -p KEY; edit --rename
   comment KEY-N TEXT|-            add a comment (- reads stdin; --file PATH)
-  guide                           this text
-  db                              database path and schema version
+  export | import FILE|- | backup  move projects between databases; copy the database
+  guide | db                      this text; database path and schema version
   Every command has --help.
