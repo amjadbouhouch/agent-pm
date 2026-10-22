@@ -1,5 +1,5 @@
-apm: a small project tracker for agents and humans (projects, milestones, tasks,
-subtasks, assignees, comments, custom statuses and attributes). One SQLite file, no server.
+apm: a small project tracker for agents and humans (projects, milestones, tasks, subtasks,
+assignees, comments, tags, links, history, custom statuses and attributes). One SQLite file.
 
 SETUP
   Database: --db PATH > $APM_DB > ~/.agent-pm/apm.db (created on first use).
@@ -14,6 +14,7 @@ JSON CONTRACT (--json, works on every command)
 IDS
   Project KEY: 1-10 letters/digits, starting with a letter (APM). Case-insensitive.
   Task KEY-N: APM-12, numbered per project, never reused.
+  Old ids keep resolving after `move` or `project edit --key`; output shows current ids.
   Milestones, statuses and custom attributes are named within a project (-p KEY).
 
 WORKFLOW
@@ -74,7 +75,7 @@ VALUES
   Category: todo | active | done | cancelled. New tasks get the first todo status;
             start = first active, done = first done, block = the status named blocked.
   Priority: none (default) | low | medium | high | urgent
-  Due:      YYYY-MM-DD, or YYYY-MM-DDTHH:MM[:SS] with Z or ±HH:MM (stored as UTC ...Z).
+  Due:      YYYY-MM-DD, or YYYY-MM-DDTHH:MM[:SS] with Z or +HH:MM/-HH:MM (stored as UTC ...Z).
             A date bound (--due-before/--due-after) compares the UTC date part of a due.
   Sort:     id created updated due priority status title; -key = descending; no due last.
   Checkbox: true/false/yes/no/1/0. Date attributes: YYYY-MM-DD; datetime: like due.
