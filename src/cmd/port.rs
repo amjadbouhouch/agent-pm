@@ -673,7 +673,7 @@ fn check(data: &mut Export) -> Result<()> {
             }
             for e in &t.events {
                 if db::EventKind::parse(&e.kind).is_none() {
-                    return Err(at(err(format!("unknown event kind: {:?}", e.kind))));
+                    return Err(at(err(format!("unknown event kind: {}", e.kind))));
                 }
                 check_time(&e.at).map_err(at)?;
             }

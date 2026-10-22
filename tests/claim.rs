@@ -739,7 +739,7 @@ fn export_import_drops_live_claims_and_next_works_after_import() {
     dst.json(&["import", file.to_str().unwrap(), "--key", "NEW"]);
     let t1 = dst.json(&["show", "NEW-1"]);
     assert_eq!(t1["claim"], Value::Null, "claims are not exported");
-    // History keeps the claim event (the KEY in its text is the one it had then).
+    // History keeps the claim event.
     let kinds: Vec<String> = dst
         .json(&["history", "NEW-1"])
         .as_array()
