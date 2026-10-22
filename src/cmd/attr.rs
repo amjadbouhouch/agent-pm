@@ -215,6 +215,48 @@ fn check_name(name: &str) -> Result<&str> {
     Ok(name)
 }
 
+/// A select needs distinct, non-empty options; other types take none.
+fn check_options(kind: AttrType, options: &[String]) -> Result<()> {
+    if kind == AttrType::Select {
+        if options.is_empty() {
+            return Err(err("a select needs --options"));
+        }
+        if options.iter().any(|o| o.trim().is_empty()) {
+            return Err(err("empty option in --options"));
+        }
+        if let Some(dup) = options
+            .iter()
+            .enumerate()
+            .find_map(|(i, o)| options[..i].contains(o).then_some(o))
+        {
+            return Err(err(format!("duplicate option: {dup}")));
+        }
+    } else if !options.is_empty() {
+        return Err(err("--options is only for select attributes"));
+    }
+    Ok(())
+}
+
+/// Check an attribute declared in an import file as `attr add` would. Used by `import`.
+pub fn check_decl(name: &str, kind: &str, options: &[String]) -> Result<()> {
+    if check_name(name)? != name {
+        return Err(err(format!("invalid attribute name: `{name}`")));
+    }
+    check_options(AttrType::parse(kind)?, options)
+}
+
+/// A value for an attribute declared as `kind` with `options`, validated and in its stored
+/// form. Used by `import`.
+pub fn normalize_value(name: &str, kind: &str, options: &[String], value: &str) -> Result<String> {
+    let attr = Attr {
+        id: 0,
+        name: name.to_string(),
+        kind: AttrType::parse(kind)?,
+        options: options.to_vec(),
+    };
+    attr.normalize(value)
+}
+
 /// The UNIQUE (project_id, name) error, for `db::unique`.
 fn already_exists(name: &str) -> crate::error::AppError {
     err(format!("attribute already exists: {name}"))
@@ -229,23 +271,7 @@ fn add(ctx: &Ctx, name: &str, project: &str, kind: AttrType, options: Vec<String
     let project_id = db::project_id(&ctx.conn, project)?;
     let name = check_name(name)?;
     let options: Vec<String> = options.iter().map(|o| o.trim().to_string()).collect();
-    if kind == AttrType::Select {
-        if options.is_empty() {
-            return Err(err("a select needs --options"));
-        }
-        if options.iter().any(String::is_empty) {
-            return Err(err("empty option in --options"));
-        }
-        if let Some(dup) = options
-            .iter()
-            .enumerate()
-            .find_map(|(i, o)| options[..i].contains(o).then_some(o))
-        {
-            return Err(err(format!("duplicate option: {dup}")));
-        }
-    } else if !options.is_empty() {
-        return Err(err("--options is only for select attributes"));
-    }
+    check_options(kind, &options)?;
     // The UNIQUE (project_id, name) constraint is the duplicate check, so a concurrent add
     // of the same name gets the same error.
     db::unique(

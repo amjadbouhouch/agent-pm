@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser, Subcommand};
 
-use crate::cmd::{attr, comment, history, item, link, milestone, mv, project, status, tag};
+use crate::cmd::{attr, comment, history, item, link, milestone, mv, port, project, status, tag};
 
 /// agent-pm: a small project tracker for agents and humans.
 #[derive(Parser, Debug)]
@@ -82,6 +82,12 @@ pub enum Command {
     Tags(tag::TagsArgs),
     /// Show a task's change history, oldest first
     History(history::HistoryArgs),
+    /// Export projects as versioned JSON (stdout, or -o FILE)
+    Export(port::ExportArgs),
+    /// Recreate projects from an export file (all or nothing)
+    Import(port::ImportArgs),
+    /// Copy the whole database to a backup file
+    Backup(port::BackupArgs),
     /// Print a compact usage guide for agents
     Guide,
     /// Show the database path and schema version
