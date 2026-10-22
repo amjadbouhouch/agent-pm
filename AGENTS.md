@@ -50,6 +50,10 @@ scripts/           version-updater.cjs for commit-and-tag-version
   name the thing (`no such project: APM`).
 - Ids: projects have an uppercase KEY (1-10 letters/digits, `db::check_project_key`); tasks are
   `KEY-N` (per-project sequence, never reused, `db::parse_item_key`). Case-insensitive on input.
+  Old ids keep resolving: a re-keyed project's old KEY via `project_aliases`, a moved task's old
+  `KEY-N` via `item_aliases`. Always look up through `db::project_id` / `db::item`; output shows
+  current ids only. A live key wins: creating or re-keying to a KEY drops the alias of that
+  name (`db::claim_project_key`), so a key is never both live and an alias.
 - Database: `--db` > `$APM_DB` > `~/.agent-pm/apm.db`. Schema changes are a **new** entry
   appended to `MIGRATIONS` in `db.rs`; never edit a released one. Foreign keys are on.
   Timestamps are UTC ISO text written by SQLite defaults; set `updated_at` on every update.

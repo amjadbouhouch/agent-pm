@@ -6,7 +6,7 @@ use clap::{Subcommand, ValueEnum};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Map, Value, json};
 
-use super::Ctx;
+use super::{Ctx, project};
 use crate::error::{Result, err};
 use crate::{db, model, output};
 
@@ -47,6 +47,15 @@ pub enum AttrCmd {
         /// Allowed values for a select, comma-separated
         #[arg(long, value_delimiter = ',')]
         options: Vec<String>,
+    },
+    /// Rename a custom attribute (its values follow)
+    Edit {
+        name: String,
+        #[arg(short, long)]
+        project: String,
+        /// New name
+        #[arg(long)]
+        rename: Option<String>,
     },
     /// List a project's custom attributes
     List {
@@ -177,13 +186,18 @@ pub fn run(ctx: &Ctx, cmd: AttrCmd) -> Result<()> {
             kind,
             options,
         } => add(ctx, &name, &project, kind, options),
+        AttrCmd::Edit {
+            name,
+            project,
+            rename,
+        } => edit(ctx, &name, &project, rename.as_deref()),
         AttrCmd::List { project } => list(ctx, &project),
         AttrCmd::Rm { name, project } => rm(ctx, &name, &project),
     }
 }
 
-fn add(ctx: &Ctx, name: &str, project: &str, kind: AttrType, options: Vec<String>) -> Result<()> {
-    let project_id = db::project_id(&ctx.conn, project)?;
+/// A new attribute name, trimmed: not empty, no `=`, not a built-in field.
+fn check_name(name: &str) -> Result<&str> {
     let name = name.trim();
     if name.is_empty() {
         return Err(err("attribute name is empty"));
@@ -194,6 +208,22 @@ fn add(ctx: &Ctx, name: &str, project: &str, kind: AttrType, options: Vec<String
     if BUILT_IN.contains(&name.to_lowercase().as_str()) {
         return Err(err(format!("built-in field: {name}")));
     }
+    Ok(name)
+}
+
+/// The UNIQUE (project_id, name) error, for `db::unique`.
+fn already_exists(name: &str) -> crate::error::AppError {
+    err(format!("attribute already exists: {name}"))
+}
+
+/// A project's current key (the user may have passed an alias).
+fn key(conn: &Connection, project_id: i64) -> Result<String> {
+    Ok(project::get(conn, project_id)?.key)
+}
+
+fn add(ctx: &Ctx, name: &str, project: &str, kind: AttrType, options: Vec<String>) -> Result<()> {
+    let project_id = db::project_id(&ctx.conn, project)?;
+    let name = check_name(name)?;
     let options: Vec<String> = options.iter().map(|o| o.trim().to_string()).collect();
     if kind == AttrType::Select {
         if options.is_empty() {
@@ -224,7 +254,7 @@ fn add(ctx: &Ctx, name: &str, project: &str, kind: AttrType, options: Vec<String
                 serde_json::to_string(&options)?
             ],
         ),
-        || err(format!("attribute already exists: {name}")),
+        || already_exists(name),
     )?;
     let attr = Attr {
         id: ctx.conn.last_insert_rowid(),
@@ -233,14 +263,37 @@ fn add(ctx: &Ctx, name: &str, project: &str, kind: AttrType, options: Vec<String
         options,
     };
     let line = format!("added attribute {name}");
-    output::written(ctx.json, &attr.to_json(&project.to_uppercase()), &line)
+    output::written(ctx.json, &attr.to_json(&key(&ctx.conn, project_id)?), &line)
+}
+
+fn edit(ctx: &Ctx, name: &str, project: &str, rename: Option<&str>) -> Result<()> {
+    let Some(rename) = rename else {
+        return Err(err("nothing to change: pass --rename"));
+    };
+    let rename = check_name(rename)?;
+    let project_id = db::project_id(&ctx.conn, project)?;
+    let attr = find(&ctx.conn, project_id, name)?
+        .ok_or_else(|| err(format!("no such attribute: {name}")))?;
+    db::unique(
+        ctx.conn.execute(
+            "UPDATE attributes SET name = ?1 WHERE id = ?2",
+            params![rename, attr.id],
+        ),
+        || already_exists(rename),
+    )?;
+    let attr = Attr {
+        name: rename.to_string(),
+        ..attr
+    };
+    let line = format!("renamed attribute {name} to {rename}");
+    output::written(ctx.json, &attr.to_json(&key(&ctx.conn, project_id)?), &line)
 }
 
 fn list(ctx: &Ctx, project: &str) -> Result<()> {
     let project_id = db::project_id(&ctx.conn, project)?;
     let attrs = project_attrs(&ctx.conn, project_id)?;
     if ctx.json {
-        let key = project.to_uppercase();
+        let key = key(&ctx.conn, project_id)?;
         let all: Vec<Value> = attrs.iter().map(|a| a.to_json(&key)).collect();
         return output::json(&all);
     }
@@ -266,7 +319,7 @@ fn rm(ctx: &Ctx, name: &str, project: &str) -> Result<()> {
     ctx.conn
         .execute("DELETE FROM attributes WHERE id = ?1", params![attr.id])?;
     let line = format!("removed attribute {name}");
-    output::written(ctx.json, &attr.to_json(&project.to_uppercase()), &line)
+    output::written(ctx.json, &attr.to_json(&key(&ctx.conn, project_id)?), &line)
 }
 
 /// Validate and store `name=value` pairs on a task. Used by item add/edit.
@@ -393,6 +446,53 @@ pub fn values_for_item(conn: &Connection, item_id: i64) -> Result<Map<String, Va
         out.insert(name, typed);
     }
     Ok(out)
+}
+
+/// Re-point a task's values at another project's attributes, for `move`: a value is kept
+/// where the target has an attribute of the same name and type that accepts it, and deleted
+/// otherwise. Returns the deleted values (name -> stored value).
+pub fn move_values(
+    conn: &Connection,
+    item_id: i64,
+    project_id: i64,
+) -> Result<BTreeMap<String, String>> {
+    let targets = project_attrs(conn, project_id)?;
+    let mut stmt = conn.prepare(
+        "SELECT v.attribute_id, a.name, a.type, v.value FROM item_values v
+         JOIN attributes a ON a.id = v.attribute_id
+         WHERE v.item_id = ?1",
+    )?;
+    let values = stmt
+        .query_map(params![item_id], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut dropped = BTreeMap::new();
+    for (attribute_id, name, kind, value) in values {
+        let target = targets
+            .iter()
+            .find(|a| a.name == name && a.kind.as_str() == kind)
+            .filter(|a| a.normalize(&value).is_ok());
+        match target {
+            Some(t) => conn.execute(
+                "UPDATE item_values SET attribute_id = ?1 WHERE item_id = ?2 AND attribute_id = ?3",
+                params![t.id, item_id, attribute_id],
+            )?,
+            None => {
+                dropped.insert(name, value);
+                conn.execute(
+                    "DELETE FROM item_values WHERE item_id = ?1 AND attribute_id = ?2",
+                    params![item_id, attribute_id],
+                )?
+            }
+        };
+    }
+    Ok(dropped)
 }
 
 /// A task's attribute values as stored (normalized text), by attribute name. Used by history.

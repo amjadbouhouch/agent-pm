@@ -47,6 +47,13 @@ STATUSES
   apm edit APM-3 --status Review                     # names are case-insensitive
   apm status rm blocked -p APM --to review           # --to moves its tasks first
 
+MOVE AND RENAME (old task ids and project keys keep resolving)
+  apm project add OPS "operations"
+  apm move APM-3 OPS                                 # now OPS-1; subtasks move too
+  apm show APM-3                                     # finds OPS-1
+  apm project edit OPS --key INFRA                   # OPS-1 is now INFRA-1
+  apm attr edit points -p APM --rename estimate
+
 VALUES
   Status:   a status of the task's project; JSON has `status` and `status_category`.
   Category: todo | active | done | cancelled. New tasks get the first todo status;
@@ -56,12 +63,13 @@ VALUES
   `list` hides done/cancelled-category tasks unless --all or --status.
 
 COMMANDS
-  project add|list|show|edit|rm   manage projects (rm deletes everything in it)
+  project add|list|show|edit|rm   manage projects (edit --key re-keys; rm deletes all in it)
   add | list | show | edit | rm   tasks; filters: -p --status -a -m --parent --where
   start | done | block            status shortcuts
+  move KEY-N PROJECT              move a task and its subtasks, renumbered in PROJECT
   status list|add|edit|rm         custom statuses, -p KEY; a project keeps at least one
   milestone add|list|show|edit|close|reopen|rm   -p KEY; rm keeps its tasks
-  attr add|list|rm                custom attributes, -p KEY
+  attr add|edit|list|rm           custom attributes, -p KEY; edit --rename
   comment KEY-N TEXT              add a comment
   guide                           this text
   db                              database path and schema version

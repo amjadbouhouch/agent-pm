@@ -6,6 +6,7 @@ pub mod db;
 pub mod guide;
 pub mod item;
 pub mod milestone;
+pub mod mv;
 pub mod project;
 pub mod status;
 
@@ -42,6 +43,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Done(a) => item::set_status(&ctx, a, Shortcut::Done),
         Command::Block(a) => item::set_status(&ctx, a, Shortcut::Block),
         Command::Rm(a) => item::rm(&ctx, a),
+        Command::Move(a) => mv::run(&ctx, a),
         Command::Milestone(c) => milestone::run(&ctx, c),
         Command::Status(c) => status::run(&ctx, c),
         Command::Attr(c) => attr::run(&ctx, c),
