@@ -58,7 +58,7 @@ pub fn run(ctx: &Ctx, args: HistoryArgs) -> Result<()> {
     Ok(())
 }
 
-/// `<at> <actor> <kind> <field>: <old> → <new>`. Field changes always show both sides
+/// `<at> <actor> <kind> <field>: <old> -> <new>`. Field changes always show both sides
 /// (`-` = empty); other kinds show only the value they carry (`created title`, `tagged bug`).
 /// Line breaks in values print as `\n` / `\r`, so every event stays on one line.
 fn line(e: &Event) -> String {
@@ -69,8 +69,8 @@ fn line(e: &Event) -> String {
     let one = |v: &str| v.replace('\r', "\\r").replace('\n', "\\n");
     let dash = |v: &Option<String>| v.as_deref().map_or_else(|| "-".to_string(), one);
     match (e.kind.as_str(), &e.old, &e.new) {
-        ("changed" | "attr", old, new) => s.push_str(&format!(" {} → {}", dash(old), dash(new))),
-        (_, Some(old), Some(new)) => s.push_str(&format!(" {} → {}", one(old), one(new))),
+        ("changed" | "attr", old, new) => s.push_str(&format!(" {} -> {}", dash(old), dash(new))),
+        (_, Some(old), Some(new)) => s.push_str(&format!(" {} -> {}", one(old), one(new))),
         (_, Some(v), None) | (_, None, Some(v)) => s.push_str(&format!(" {}", one(v))),
         (_, None, None) => {}
     }
@@ -100,15 +100,15 @@ mod tests {
             (ev("created", None, None, Some("t")), "created t"),
             (
                 ev("changed", Some("status"), Some("todo"), Some("doing")),
-                "changed status: todo → doing",
+                "changed status: todo -> doing",
             ),
             (
                 ev("changed", Some("due"), None, Some("2026-12-01")),
-                "changed due: - → 2026-12-01",
+                "changed due: - -> 2026-12-01",
             ),
             (
                 ev("attr", Some("points"), Some("3"), None),
-                "attr points: 3 → -",
+                "attr points: 3 -> -",
             ),
             (ev("tagged", None, None, Some("bug")), "tagged bug"),
             (ev("untagged", None, Some("bug"), None), "untagged bug"),
@@ -122,7 +122,7 @@ mod tests {
             ),
             (
                 ev("changed", Some("body"), Some("x\ny"), None),
-                r"changed body: x\ny → -",
+                r"changed body: x\ny -> -",
             ),
         ];
         for (e, want) in cases {

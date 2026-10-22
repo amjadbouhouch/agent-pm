@@ -101,13 +101,13 @@ impl When {
     }
 }
 
-/// Parse `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM[:SS]` followed by `Z` or `±HH:MM`.
+/// Parse `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM[:SS]` followed by `Z` or `+HH:MM/-HH:MM`.
 /// Date-times are converted to UTC; a date-time without a zone is an error (there is no tz
 /// database to guess one from).
 pub fn parse_when(s: &str) -> Result<When> {
     let bad = || {
         err(format!(
-            "invalid date/time `{s}`, expected YYYY-MM-DD or YYYY-MM-DDTHH:MM[:SS] with Z or ±HH:MM"
+            "invalid date/time `{s}`, expected YYYY-MM-DD or YYYY-MM-DDTHH:MM[:SS] with Z or +HH:MM/-HH:MM"
         ))
     };
     let Some((date, rest)) = s.split_once('T') else {

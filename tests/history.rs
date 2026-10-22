@@ -322,8 +322,8 @@ fn history_text_lines() {
         lines,
         [
             "alice created t",
-            "bob changed status: todo → doing",
-            "bob changed due: - → 2026-12-01",
+            "bob changed status: todo -> doing",
+            "bob changed due: - -> 2026-12-01",
             "bob tagged ui",
             // One line per event: line breaks print as \n (JSON keeps the real text).
             r"bob commented line one\nline two",
