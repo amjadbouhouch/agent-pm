@@ -3,8 +3,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
 use super::Ctx;
+use crate::db::{self, EventKind};
 use crate::error::{Result, err};
-use crate::{db, model, output};
+use crate::{model, output};
 
 #[derive(Subcommand, Debug)]
 pub enum MilestoneCmd {
@@ -80,7 +81,8 @@ pub struct Milestone {
     pub updated_at: String,
 }
 
-/// `total` counts tasks that are not cancelled; `done` and `cancelled` count those statuses.
+/// By status category: `total` counts tasks that are not cancelled; `done` and `cancelled`
+/// count tasks in done- and cancelled-category statuses.
 #[derive(Serialize, Debug)]
 pub struct Progress {
     pub total: i64,
@@ -134,12 +136,13 @@ pub fn resolve(conn: &Connection, project_id: i64, name: &str) -> Result<i64> {
 pub fn load(conn: &Connection, id: i64) -> Result<Milestone> {
     Ok(conn.query_row(
         "SELECT m.id, m.name, p.key, m.description, m.due, m.status, m.created_at, m.updated_at,
-                COUNT(i.id) - COUNT(CASE WHEN i.status = 'cancelled' THEN 1 END),
-                COUNT(CASE WHEN i.status = 'done' THEN 1 END),
-                COUNT(CASE WHEN i.status = 'cancelled' THEN 1 END)
+                COUNT(i.id) - COUNT(CASE WHEN s.category = 'cancelled' THEN 1 END),
+                COUNT(CASE WHEN s.category = 'done' THEN 1 END),
+                COUNT(CASE WHEN s.category = 'cancelled' THEN 1 END)
          FROM milestones m
          JOIN projects p ON p.id = m.project_id
          LEFT JOIN items i ON i.milestone_id = m.id
+         LEFT JOIN statuses s ON s.id = i.status_id
          WHERE m.id = ?1
          GROUP BY m.id",
         params![id],
@@ -244,7 +247,9 @@ fn list(ctx: &Ctx, project: &str, all: bool) -> Result<()> {
 fn show(ctx: &Ctx, project: &str, name: &str) -> Result<()> {
     let m = load(&ctx.conn, find(&ctx.conn, project, name)?)?;
     let mut stmt = ctx.conn.prepare(
-        "SELECT seq, status, title, assignee FROM items WHERE milestone_id = ?1 ORDER BY seq",
+        "SELECT i.seq, s.name, i.title, i.assignee FROM items i
+         JOIN statuses s ON s.id = i.status_id
+         WHERE i.milestone_id = ?1 ORDER BY i.seq",
     )?;
     let items = stmt
         .query_map(params![m.id], |r| {
@@ -351,10 +356,36 @@ fn set_status(ctx: &Ctx, project: &str, name: &str, status: &str) -> Result<()> 
     )
 }
 
-/// Delete a milestone. Its tasks stay, with no milestone (ON DELETE SET NULL).
+/// Delete a milestone. Its tasks stay, with no milestone; each records that change.
 fn rm(ctx: &Ctx, project: &str, name: &str) -> Result<()> {
-    let m = load(&ctx.conn, find(&ctx.conn, project, name)?)?;
-    ctx.conn
-        .execute("DELETE FROM milestones WHERE id = ?1", params![m.id])?;
+    let tx = db::write_tx(&ctx.conn)?;
+    let m = load(&tx, find(&tx, project, name)?)?;
+    let mut stmt = tx.prepare("SELECT id FROM items WHERE milestone_id = ?1")?;
+    let ids = stmt
+        .query_map(params![m.id], |r| r.get(0))?
+        .collect::<rusqlite::Result<Vec<i64>>>()?;
+    drop(stmt);
+    for item_id in ids {
+        let field = Some("milestone");
+        db::record_event(
+            &tx,
+            item_id,
+            &ctx.actor,
+            EventKind::Changed,
+            field,
+            Some(&m.name),
+            None,
+        )?;
+        tx.execute(
+            &format!(
+                "UPDATE items SET updated_at = {} WHERE id = ?1",
+                db::NOW_SQL
+            ),
+            params![item_id],
+        )?;
+    }
+    // ON DELETE SET NULL clears the tasks' milestone.
+    tx.execute("DELETE FROM milestones WHERE id = ?1", params![m.id])?;
+    tx.commit()?;
     output::written(ctx.json, &m, &format!("removed milestone {}", m.name))
 }

@@ -2,14 +2,17 @@
 
 use clap::{Args, ValueEnum};
 use rusqlite::types::Value as SqlValue;
-use rusqlite::{Connection, Transaction, TransactionBehavior, params, params_from_iter};
+use std::collections::BTreeMap;
+
+use rusqlite::{Connection, params, params_from_iter};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
+use super::status::{self, Shortcut};
 use super::{Ctx, attr, comment, milestone};
-use crate::db;
+use crate::db::{self, EventKind};
 use crate::error::{Result, err};
-use crate::model::{Priority, Status, check_date, parse_pair};
+use crate::model::{Category, Priority, check_date, parse_pair};
 use crate::output;
 
 #[derive(Args, Debug)]
@@ -34,8 +37,9 @@ pub struct AddArgs {
     pub assignee: Option<String>,
     #[arg(long, value_enum)]
     pub priority: Option<Priority>,
-    #[arg(long, value_enum)]
-    pub status: Option<Status>,
+    /// A status of the project (default: its first todo-category status)
+    #[arg(long)]
+    pub status: Option<String>,
     /// Due date, YYYY-MM-DD
     #[arg(long)]
     pub due: Option<String>,
@@ -51,9 +55,9 @@ pub struct AddArgs {
 pub struct ListArgs {
     #[arg(short, long)]
     pub project: Option<String>,
-    /// Only these statuses (comma-separated); implies closed ones may show
-    #[arg(long, value_enum, value_delimiter = ',')]
-    pub status: Vec<Status>,
+    /// Only these status names (comma-separated); implies closed ones may show
+    #[arg(long, value_delimiter = ',')]
+    pub status: Vec<String>,
     #[arg(short, long)]
     pub assignee: Option<String>,
     #[arg(short, long)]
@@ -76,8 +80,9 @@ pub struct EditArgs {
     pub title: Option<String>,
     #[arg(short, long)]
     pub body: Option<String>,
-    #[arg(long, value_enum)]
-    pub status: Option<Status>,
+    /// A status of the task's project
+    #[arg(long)]
+    pub status: Option<String>,
     #[arg(long, value_enum)]
     pub priority: Option<Priority>,
     #[arg(short, long)]
@@ -106,7 +111,9 @@ pub struct Item {
     pub project: String,
     pub title: String,
     pub body: String,
+    /// The status name.
     pub status: String,
+    pub status_category: String,
     pub priority: String,
     pub assignee: Option<String>,
     pub due: Option<String>,
@@ -128,17 +135,18 @@ struct Detail {
 }
 
 const SELECT: &str = "
-    SELECT i.id, p.key || '-' || i.seq, p.key, i.title, i.body, i.status, i.priority,
+    SELECT i.id, p.key || '-' || i.seq, p.key, i.title, i.body, s.name, s.category, i.priority,
            i.assignee, i.due, m.name, p.key || '-' || par.seq,
            i.created_by, i.created_at, i.updated_at
     FROM items i
     JOIN projects p ON p.id = i.project_id
+    JOIN statuses s ON s.id = i.status_id
     LEFT JOIN milestones m ON m.id = i.milestone_id
     LEFT JOIN items par ON par.id = i.parent_id";
 
 pub fn add(ctx: &Ctx, args: AddArgs) -> Result<()> {
     check_title(&args.title)?;
-    let tx = write_tx(&ctx.conn)?;
+    let tx = db::write_tx(&ctx.conn)?;
     let parent = args
         .parent
         .as_deref()
@@ -170,13 +178,17 @@ pub fn add(ctx: &Ctx, args: AddArgs) -> Result<()> {
         .as_deref()
         .map(|m| milestone::resolve(&tx, project_id, m))
         .transpose()?;
+    let status_id = match &args.status {
+        Some(name) => status::resolve(&tx, project_id, name)?,
+        None => status::default_id(&tx, project_id)?,
+    };
     let seq: i64 = tx.query_row(
         "UPDATE projects SET next_seq = next_seq + 1 WHERE id = ?1 RETURNING next_seq - 1",
         params![project_id],
         |r| r.get(0),
     )?;
     tx.execute(
-        "INSERT INTO items (project_id, seq, parent_id, milestone_id, title, body, status,
+        "INSERT INTO items (project_id, seq, parent_id, milestone_id, title, body, status_id,
                             priority, assignee, due, created_by)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
@@ -186,7 +198,7 @@ pub fn add(ctx: &Ctx, args: AddArgs) -> Result<()> {
             milestone_id,
             args.title,
             args.body.as_deref().unwrap_or(""),
-            args.status.unwrap_or(Status::Todo).as_str(),
+            status_id,
             args.priority.unwrap_or(Priority::None).as_str(),
             args.assignee,
             args.due,
@@ -194,6 +206,15 @@ pub fn add(ctx: &Ctx, args: AddArgs) -> Result<()> {
         ],
     )?;
     let id = tx.last_insert_rowid();
+    db::record_event(
+        &tx,
+        id,
+        &ctx.actor,
+        EventKind::Created,
+        None,
+        None,
+        Some(&args.title),
+    )?;
     attr::set_values(&tx, project_id, id, &args.set)?;
     tx.commit()?;
     let item = get(&ctx.conn, id)?;
@@ -212,24 +233,6 @@ pub fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
     if let Some(id) = project_id {
         conds.push(format!("i.project_id = {}", bind(&mut vals, id)));
     }
-    if !args.status.is_empty() {
-        let marks: Vec<String> = args
-            .status
-            .iter()
-            .map(|s| bind(&mut vals, s.as_str().to_string()))
-            .collect();
-        conds.push(format!("i.status IN ({})", marks.join(", ")));
-    } else if !args.all {
-        let marks: Vec<String> = Status::value_variants()
-            .iter()
-            .filter(|s| s.is_closed())
-            .map(|s| bind(&mut vals, s.as_str().to_string()))
-            .collect();
-        conds.push(format!("i.status NOT IN ({})", marks.join(", ")));
-    }
-    if let Some(who) = &args.assignee {
-        conds.push(format!("i.assignee = {}", bind(&mut vals, who.clone())));
-    }
     let parent = args
         .parent
         .as_deref()
@@ -238,9 +241,36 @@ pub fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
     if let Some(parent) = parent {
         conds.push(format!("i.parent_id = {}", bind(&mut vals, parent.id)));
     }
+    let known_project = project_id.or(parent.map(|p| p.project_id));
+    if !args.status.is_empty() {
+        // With a known project the names must exist there; otherwise match them in any project.
+        let mut marks = Vec::new();
+        for name in &args.status {
+            let mark = match known_project {
+                Some(pid) => bind(&mut vals, status::resolve(conn, pid, name)?),
+                None => bind(&mut vals, status::check_known_name(conn, name)?),
+            };
+            marks.push(mark);
+        }
+        let column = match known_project {
+            Some(_) => "i.status_id",
+            None => "s.name COLLATE NOCASE",
+        };
+        conds.push(format!("{column} IN ({})", marks.join(", ")));
+    } else if !args.all {
+        let marks: Vec<String> = Category::value_variants()
+            .iter()
+            .filter(|c| c.is_closed())
+            .map(|c| bind(&mut vals, c.as_str().to_string()))
+            .collect();
+        conds.push(format!("s.category NOT IN ({})", marks.join(", ")));
+    }
+    if let Some(who) = &args.assignee {
+        conds.push(format!("i.assignee = {}", bind(&mut vals, who.clone())));
+    }
     if let Some(name) = &args.milestone {
         // With a known project the name must exist there; otherwise match it in any project.
-        match project_id.or(parent.map(|p| p.project_id)) {
+        match known_project {
             Some(pid) => {
                 let id = milestone::resolve(conn, pid, name)?;
                 conds.push(format!("i.milestone_id = {}", bind(&mut vals, id)));
@@ -346,7 +376,7 @@ pub fn show(ctx: &Ctx, args: KeyArg) -> Result<()> {
 }
 
 pub fn edit(ctx: &Ctx, args: EditArgs) -> Result<()> {
-    let tx = write_tx(&ctx.conn)?;
+    let tx = db::write_tx(&ctx.conn)?;
     let item = db::item(&tx, &args.key)?;
     let nothing = args.title.is_none()
         && args.body.is_none()
@@ -369,6 +399,7 @@ pub fn edit(ctx: &Ctx, args: EditArgs) -> Result<()> {
     if let Some(due) = &args.due {
         check_date(due)?;
     }
+    let before = snapshot(&tx, item.id)?;
     let mut sets: Vec<String> = Vec::new();
     let mut vals: Vec<SqlValue> = Vec::new();
     let mut set = |col: &str, v: SqlValue| {
@@ -381,8 +412,11 @@ pub fn edit(ctx: &Ctx, args: EditArgs) -> Result<()> {
     if let Some(v) = &args.body {
         set("body", v.clone().into());
     }
-    if let Some(v) = args.status {
-        set("status", v.as_str().to_string().into());
+    if let Some(name) = &args.status {
+        set(
+            "status_id",
+            status::resolve(&tx, item.project_id, name)?.into(),
+        );
     }
     if let Some(v) = args.priority {
         set("priority", v.as_str().to_string().into());
@@ -441,22 +475,27 @@ pub fn edit(ctx: &Ctx, args: EditArgs) -> Result<()> {
         params_from_iter(vals.iter()),
     )?;
     attr::set_values(&tx, item.project_id, item.id, &args.set)?;
+    record_changes(&tx, &ctx.actor, &before, &snapshot(&tx, item.id)?)?;
     tx.commit()?;
     let item = get(&ctx.conn, item.id)?;
     output::written(ctx.json, &item, &format!("updated {}", item.id))
 }
 
-pub fn set_status(ctx: &Ctx, args: KeyArg, status: Status) -> Result<()> {
-    let conn = &ctx.conn;
-    let item = db::item(conn, &args.key)?;
-    conn.execute(
+pub fn set_status(ctx: &Ctx, args: KeyArg, shortcut: Shortcut) -> Result<()> {
+    let tx = db::write_tx(&ctx.conn)?;
+    let item = db::item(&tx, &args.key)?;
+    let status_id = status::for_shortcut(&tx, item.project_id, shortcut)?;
+    let before = snapshot(&tx, item.id)?;
+    tx.execute(
         &format!(
-            "UPDATE items SET status = ?1, updated_at = {} WHERE id = ?2",
+            "UPDATE items SET status_id = ?1, updated_at = {} WHERE id = ?2",
             db::NOW_SQL
         ),
-        params![status.as_str(), item.id],
+        params![status_id, item.id],
     )?;
-    let item = get(conn, item.id)?;
+    record_changes(&tx, &ctx.actor, &before, &snapshot(&tx, item.id)?)?;
+    tx.commit()?;
+    let item = get(&ctx.conn, item.id)?;
     output::written(
         ctx.json,
         &item,
@@ -465,7 +504,7 @@ pub fn set_status(ctx: &Ctx, args: KeyArg, status: Status) -> Result<()> {
 }
 
 pub fn rm(ctx: &Ctx, args: KeyArg) -> Result<()> {
-    let tx = write_tx(&ctx.conn)?;
+    let tx = db::write_tx(&ctx.conn)?;
     let r = db::item(&tx, &args.key)?;
     let item = get(&tx, r.id)?;
     let subtasks: i64 = tx.query_row(
@@ -485,15 +524,6 @@ pub fn rm(ctx: &Ctx, args: KeyArg) -> Result<()> {
     output::written(ctx.json, &item, &line)
 }
 
-/// A transaction that takes the write lock up front, so a read-then-write cannot fail with
-/// SQLITE_BUSY_SNAPSHOT when another agent commits in between (busy_timeout does not retry that).
-fn write_tx(conn: &Connection) -> Result<Transaction<'_>> {
-    Ok(Transaction::new_unchecked(
-        conn,
-        TransactionBehavior::Immediate,
-    )?)
-}
-
 /// One item by row id.
 pub fn get(conn: &Connection, id: i64) -> Result<Item> {
     query(conn, "i.id = ?1", &[id.into()])?
@@ -501,7 +531,7 @@ pub fn get(conn: &Connection, id: i64) -> Result<Item> {
         .ok_or_else(|| err(format!("no such item id: {id}")))
 }
 
-/// Items matching a WHERE condition over `items i` (joined with `projects p`,
+/// Items matching a WHERE condition over `items i` (joined with `projects p`, `statuses s`,
 /// `milestones m` and the parent `par`), ordered by project key then number.
 pub fn query(conn: &Connection, cond: &str, vals: &[SqlValue]) -> Result<Vec<Item>> {
     let sql = format!("{SELECT} WHERE {cond} ORDER BY p.key, i.seq");
@@ -514,14 +544,15 @@ pub fn query(conn: &Connection, cond: &str, vals: &[SqlValue]) -> Result<Vec<Ite
             title: r.get(3)?,
             body: r.get(4)?,
             status: r.get(5)?,
-            priority: r.get(6)?,
-            assignee: r.get(7)?,
-            due: r.get(8)?,
-            milestone: r.get(9)?,
-            parent: r.get(10)?,
-            created_by: r.get(11)?,
-            created_at: r.get(12)?,
-            updated_at: r.get(13)?,
+            status_category: r.get(6)?,
+            priority: r.get(7)?,
+            assignee: r.get(8)?,
+            due: r.get(9)?,
+            milestone: r.get(10)?,
+            parent: r.get(11)?,
+            created_by: r.get(12)?,
+            created_at: r.get(13)?,
+            updated_at: r.get(14)?,
             attributes: Map::new(),
         })
     })?;
@@ -530,6 +561,59 @@ pub fn query(conn: &Connection, cond: &str, vals: &[SqlValue]) -> Result<Vec<Ite
         item.attributes = attr::values_for_item(conn, item.row_id)?;
     }
     Ok(items)
+}
+
+/// A task as history compares it: its fields and its stored attribute values.
+struct Snapshot {
+    item: Item,
+    attrs: BTreeMap<String, String>,
+}
+
+fn snapshot(conn: &Connection, id: i64) -> Result<Snapshot> {
+    Ok(Snapshot {
+        item: get(conn, id)?,
+        attrs: attr::stored_values(conn, id)?,
+    })
+}
+
+/// Record a `changed` event for every built-in field and an `attr` event for every custom
+/// attribute (in name order) that differs between two snapshots of one task.
+fn record_changes(
+    conn: &Connection,
+    actor: &str,
+    before: &Snapshot,
+    after: &Snapshot,
+) -> Result<()> {
+    let (b, a) = (&before.item, &after.item);
+    let text = |s: &str| (!s.is_empty()).then(|| s.to_string());
+    let fields = [
+        ("title", text(&b.title), text(&a.title)),
+        ("body", text(&b.body), text(&a.body)),
+        ("status", text(&b.status), text(&a.status)),
+        ("priority", text(&b.priority), text(&a.priority)),
+        ("assignee", b.assignee.clone(), a.assignee.clone()),
+        ("due", b.due.clone(), a.due.clone()),
+        ("milestone", b.milestone.clone(), a.milestone.clone()),
+        ("parent", b.parent.clone(), a.parent.clone()),
+    ];
+    let id = a.row_id;
+    for (field, old, new) in fields {
+        if old != new {
+            let (old, new) = (old.as_deref(), new.as_deref());
+            db::record_event(conn, id, actor, EventKind::Changed, Some(field), old, new)?;
+        }
+    }
+    let mut names: Vec<&String> = before.attrs.keys().chain(after.attrs.keys()).collect();
+    names.sort();
+    names.dedup();
+    for name in names {
+        let (old, new) = (before.attrs.get(name), after.attrs.get(name));
+        if old != new {
+            let (old, new) = (old.map(String::as_str), new.map(String::as_str));
+            db::record_event(conn, id, actor, EventKind::Attr, Some(name), old, new)?;
+        }
+    }
+    Ok(())
 }
 
 /// A new parent must be in the same project and must not be the task or one of its subtasks.

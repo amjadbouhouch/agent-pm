@@ -41,6 +41,7 @@ fn add_returns_the_item_with_defaults() {
     assert_eq!(i["title"], "First task");
     assert_eq!(i["body"], "");
     assert_eq!(i["status"], "todo");
+    assert_eq!(i["status_category"], "todo");
     assert_eq!(i["priority"], "none");
     assert_eq!(i["assignee"], Value::Null);
     assert_eq!(i["due"], Value::Null);
@@ -246,10 +247,14 @@ fn list_errors() {
         env.json_err(&["list", "-p", "APM", "-m", "v9"]),
         "no such milestone: v9"
     );
-    env.apm()
-        .args(["--json", "list", "--status", "maybe"])
-        .assert()
-        .code(2);
+    assert_eq!(
+        env.json_err(&["list", "--status", "maybe"]),
+        "no such status: maybe"
+    );
+    assert_eq!(
+        env.json_err(&["list", "-p", "APM", "--status", "doing,maybe"]),
+        "no such status: maybe"
+    );
     assert_eq!(env.json_err(&["list", "-m", "v9"]), "no such milestone: v9");
     // --where goes through attr::filter, which rejects unknown attributes.
     env.json_err(&["list", "--where", "size=L"]);

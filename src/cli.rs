@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-use crate::cmd::{attr, comment, item, milestone, project};
+use crate::cmd::{attr, comment, item, milestone, project, status};
 
 /// agent-pm: a small project tracker for agents and humans.
 #[derive(Parser, Debug)]
@@ -37,17 +37,20 @@ pub enum Command {
     Show(item::KeyArg),
     /// Change a task
     Edit(item::EditArgs),
-    /// Set a task's status to doing
+    /// Move a task to its project's first active status (default: doing)
     Start(item::KeyArg),
-    /// Set a task's status to done
+    /// Move a task to its project's first done status (default: done)
     Done(item::KeyArg),
-    /// Set a task's status to blocked
+    /// Move a task to its project's status named blocked
     Block(item::KeyArg),
     /// Delete a task and its subtasks
     Rm(item::KeyArg),
     /// Manage milestones
     #[command(subcommand)]
     Milestone(milestone::MilestoneCmd),
+    /// Manage a project's custom statuses
+    #[command(subcommand)]
+    Status(status::StatusCmd),
     /// Manage a project's custom attributes
     #[command(subcommand)]
     Attr(attr::AttrCmd),

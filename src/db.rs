@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::error::{AppError, Result, err};
 
@@ -32,16 +32,18 @@ pub fn open(path: &Path) -> Result<Connection> {
     }
     let mut conn = Connection::open(path)?;
     // WAL + busy timeout: several agents may write at once.
+    // The timeout first: switching to WAL and migrating both wait for other writers.
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
-    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     migrate(&mut conn)?;
     Ok(conn)
 }
 
 /// Schema migrations, applied in order. `PRAGMA user_version` = number applied.
 /// Never edit a released entry; append a new one.
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE projects (
     id          INTEGER PRIMARY KEY,
     key         TEXT NOT NULL UNIQUE,
@@ -111,7 +113,115 @@ CREATE TABLE comments (
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 CREATE INDEX comments_item ON comments(item_id);
-"#];
+"#,
+    // v2: per-project statuses (items.status text -> status_id), the `datetime` attribute type,
+    // history, links, tags, aliases.
+    // Rebuilds `items` and `attributes` (SQLite cannot alter a CHECK): `migrate` turns foreign keys off around
+    // it and runs `foreign_key_check` before commit, per SQLite's 12-step ALTER procedure.
+    r#"
+CREATE TABLE statuses (
+    id         INTEGER PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    category   TEXT NOT NULL CHECK (category IN ('todo', 'active', 'done', 'cancelled')),
+    position   INTEGER NOT NULL,
+    UNIQUE (project_id, name COLLATE NOCASE)
+);
+INSERT INTO statuses (project_id, name, category, position)
+    SELECT p.id, d.column1, d.column2, d.column3
+    FROM projects p,
+         (VALUES ('todo', 'todo', 1), ('doing', 'active', 2), ('blocked', 'active', 3),
+                 ('done', 'done', 4), ('cancelled', 'cancelled', 5)) d;
+
+CREATE TABLE new_items (
+    id           INTEGER PRIMARY KEY,
+    project_id   INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    seq          INTEGER NOT NULL,
+    parent_id    INTEGER REFERENCES new_items(id) ON DELETE CASCADE,
+    milestone_id INTEGER REFERENCES milestones(id) ON DELETE SET NULL,
+    title        TEXT NOT NULL,
+    body         TEXT NOT NULL DEFAULT '',
+    status_id    INTEGER NOT NULL REFERENCES statuses(id),
+    priority     TEXT NOT NULL DEFAULT 'none'
+                 CHECK (priority IN ('none', 'low', 'medium', 'high', 'urgent')),
+    assignee     TEXT,
+    due          TEXT,
+    created_by   TEXT NOT NULL,
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    UNIQUE (project_id, seq)
+);
+INSERT INTO new_items (id, project_id, seq, parent_id, milestone_id, title, body, status_id,
+                       priority, assignee, due, created_by, created_at, updated_at)
+    SELECT i.id, i.project_id, i.seq, i.parent_id, i.milestone_id, i.title, i.body,
+           (SELECT s.id FROM statuses s WHERE s.project_id = i.project_id AND s.name = i.status),
+           i.priority, i.assignee, i.due, i.created_by, i.created_at, i.updated_at
+    FROM items i;
+DROP TABLE items;
+ALTER TABLE new_items RENAME TO items;
+CREATE INDEX items_parent ON items(parent_id);
+CREATE INDEX items_milestone ON items(milestone_id);
+CREATE INDEX items_status ON items(status_id);
+
+-- Same rebuild for `attributes`, to allow the `datetime` type.
+CREATE TABLE new_attributes (
+    id         INTEGER PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    type       TEXT NOT NULL
+               CHECK (type IN ('text', 'number', 'select', 'date', 'datetime', 'checkbox')),
+    options    TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    UNIQUE (project_id, name)
+);
+INSERT INTO new_attributes (id, project_id, name, type, options, created_at)
+    SELECT id, project_id, name, type, options, created_at FROM attributes;
+DROP TABLE attributes;
+ALTER TABLE new_attributes RENAME TO attributes;
+
+CREATE TABLE events (
+    id      INTEGER PRIMARY KEY,
+    item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    actor   TEXT NOT NULL,
+    at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    kind    TEXT NOT NULL,
+    field   TEXT,
+    old     TEXT,
+    new     TEXT
+);
+CREATE INDEX events_item ON events(item_id);
+
+CREATE TABLE links (
+    from_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    to_id   INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    kind    TEXT NOT NULL CHECK (kind IN ('blocks', 'relates', 'duplicates')),
+    PRIMARY KEY (from_id, to_id, kind),
+    CHECK (from_id != to_id)
+);
+CREATE INDEX links_to ON links(to_id);
+
+CREATE TABLE tags (
+    item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    tag     TEXT NOT NULL CHECK (tag = lower(tag)),
+    PRIMARY KEY (item_id, tag)
+);
+CREATE INDEX tags_tag ON tags(tag);
+
+CREATE TABLE project_aliases (
+    key        TEXT PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE
+);
+CREATE INDEX project_aliases_project ON project_aliases(project_id);
+
+CREATE TABLE item_aliases (
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    seq        INTEGER NOT NULL,
+    item_id    INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    PRIMARY KEY (project_id, seq)
+);
+CREATE INDEX item_aliases_item ON item_aliases(item_id);
+"#,
+];
 
 pub fn schema_version(conn: &Connection) -> Result<i64> {
     Ok(conn.pragma_query_value(None, "user_version", |r| r.get(0))?)
@@ -125,12 +235,95 @@ fn migrate(conn: &mut Connection) -> Result<()> {
             MIGRATIONS.len()
         )));
     }
-    for (i, sql) in MIGRATIONS.iter().enumerate().skip(current) {
-        let tx = conn.transaction()?;
+    if current == MIGRATIONS.len() {
+        return Ok(());
+    }
+    // Table rebuilds drop and recreate parents of foreign keys: with enforcement on, the DROP
+    // would cascade-delete their children. The pragma is a no-op inside a transaction, so it
+    // is switched here and every migration checks the keys itself before committing.
+    conn.pragma_update(None, "foreign_keys", "OFF")?;
+    let res = apply(conn);
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    res
+}
+
+/// Apply pending migrations one per transaction. Each takes the write lock first and re-reads
+/// the version inside it, so when several agents open an old database at once, one migrates
+/// and the others find the work done.
+fn apply(conn: &mut Connection) -> Result<()> {
+    loop {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let i = schema_version(&tx)? as usize;
+        let Some(sql) = MIGRATIONS.get(i) else {
+            return Ok(());
+        };
         tx.execute_batch(sql)?;
+        let broken: bool = tx.query_row(
+            "SELECT count(*) > 0 FROM pragma_foreign_key_check",
+            [],
+            |r| r.get(0),
+        )?;
+        if broken {
+            return Err(err(format!(
+                "migration to schema v{} broke foreign keys",
+                i + 1
+            )));
+        }
         tx.pragma_update(None, "user_version", (i + 1) as i64)?;
         tx.commit()?;
     }
+}
+
+/// A transaction that takes the write lock up front, so a read-then-write cannot fail with
+/// SQLITE_BUSY_SNAPSHOT when another agent commits in between (busy_timeout does not retry that).
+pub fn write_tx(conn: &Connection) -> Result<Transaction<'_>> {
+    Ok(Transaction::new_unchecked(
+        conn,
+        TransactionBehavior::Immediate,
+    )?)
+}
+
+/// What a history event records; stored as `events.kind`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventKind {
+    /// The task was created; new = title.
+    Created,
+    /// A built-in field changed; field = its name, old/new as shown (status name, milestone
+    /// name, parent KEY-N), None = empty.
+    Changed,
+    /// A custom attribute changed; field = attribute name, old/new = stored values,
+    /// None = unset.
+    Attr,
+    /// A comment was added; new = its text.
+    Commented,
+}
+
+impl EventKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EventKind::Created => "created",
+            EventKind::Changed => "changed",
+            EventKind::Attr => "attr",
+            EventKind::Commented => "commented",
+        }
+    }
+}
+
+/// Record one history event on a task. Call it inside the mutation's transaction.
+pub fn record_event(
+    conn: &Connection,
+    item_id: i64,
+    actor: &str,
+    kind: EventKind,
+    field: Option<&str>,
+    old: Option<&str>,
+    new: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO events (item_id, actor, kind, field, old, new)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![item_id, actor, kind.as_str(), field, old, new],
+    )?;
     Ok(())
 }
 
