@@ -3,8 +3,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
 use super::Ctx;
+use crate::db::{self, EventKind};
 use crate::error::{Result, err};
-use crate::{db, model, output};
+use crate::{model, output};
 
 #[derive(Subcommand, Debug)]
 pub enum MilestoneCmd {
@@ -355,10 +356,36 @@ fn set_status(ctx: &Ctx, project: &str, name: &str, status: &str) -> Result<()> 
     )
 }
 
-/// Delete a milestone. Its tasks stay, with no milestone (ON DELETE SET NULL).
+/// Delete a milestone. Its tasks stay, with no milestone; each records that change.
 fn rm(ctx: &Ctx, project: &str, name: &str) -> Result<()> {
-    let m = load(&ctx.conn, find(&ctx.conn, project, name)?)?;
-    ctx.conn
-        .execute("DELETE FROM milestones WHERE id = ?1", params![m.id])?;
+    let tx = db::write_tx(&ctx.conn)?;
+    let m = load(&tx, find(&tx, project, name)?)?;
+    let mut stmt = tx.prepare("SELECT id FROM items WHERE milestone_id = ?1")?;
+    let ids = stmt
+        .query_map(params![m.id], |r| r.get(0))?
+        .collect::<rusqlite::Result<Vec<i64>>>()?;
+    drop(stmt);
+    for item_id in ids {
+        let field = Some("milestone");
+        db::record_event(
+            &tx,
+            item_id,
+            &ctx.actor,
+            EventKind::Changed,
+            field,
+            Some(&m.name),
+            None,
+        )?;
+        tx.execute(
+            &format!(
+                "UPDATE items SET updated_at = {} WHERE id = ?1",
+                db::NOW_SQL
+            ),
+            params![item_id],
+        )?;
+    }
+    // ON DELETE SET NULL clears the tasks' milestone.
+    tx.execute("DELETE FROM milestones WHERE id = ?1", params![m.id])?;
+    tx.commit()?;
     output::written(ctx.json, &m, &format!("removed milestone {}", m.name))
 }

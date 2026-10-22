@@ -1,7 +1,7 @@
 //! Projects: a KEY, a name and a description. Tasks live in a project.
 
 use clap::Subcommand;
-use rusqlite::{Connection, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, params};
 use serde::{Serialize, Serializer};
 
 use super::{Ctx, status};
@@ -88,7 +88,7 @@ fn check_name(name: &str) -> Result<()> {
 fn add(ctx: &Ctx, key: &str, name: &str, description: Option<&str>) -> Result<()> {
     let key = db::check_project_key(key)?;
     check_name(name)?;
-    let tx = Transaction::new_unchecked(&ctx.conn, TransactionBehavior::Immediate)?;
+    let tx = db::write_tx(&ctx.conn)?;
     db::unique(
         tx.execute(
             "INSERT INTO projects (key, name, description) VALUES (?1, ?2, ?3)",
@@ -170,7 +170,7 @@ fn edit(ctx: &Ctx, key: &str, name: Option<&str>, description: Option<&str>) -> 
 }
 
 fn rm(ctx: &Ctx, key: &str) -> Result<()> {
-    let tx = Transaction::new_unchecked(&ctx.conn, TransactionBehavior::Immediate)?;
+    let tx = db::write_tx(&ctx.conn)?;
     let id = db::project_id(&tx, key)?;
     let project = get(&tx, id)?;
     // Statuses, milestones, tasks and everything on them go with it (ON DELETE CASCADE).

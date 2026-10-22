@@ -2,13 +2,15 @@
 
 use clap::{Args, ValueEnum};
 use rusqlite::types::Value as SqlValue;
-use rusqlite::{Connection, Transaction, TransactionBehavior, params, params_from_iter};
+use std::collections::BTreeMap;
+
+use rusqlite::{Connection, params, params_from_iter};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
 use super::status::{self, Shortcut};
 use super::{Ctx, attr, comment, milestone};
-use crate::db;
+use crate::db::{self, EventKind};
 use crate::error::{Result, err};
 use crate::model::{Category, Priority, check_date, parse_pair};
 use crate::output;
@@ -144,7 +146,7 @@ const SELECT: &str = "
 
 pub fn add(ctx: &Ctx, args: AddArgs) -> Result<()> {
     check_title(&args.title)?;
-    let tx = write_tx(&ctx.conn)?;
+    let tx = db::write_tx(&ctx.conn)?;
     let parent = args
         .parent
         .as_deref()
@@ -208,7 +210,7 @@ pub fn add(ctx: &Ctx, args: AddArgs) -> Result<()> {
         &tx,
         id,
         &ctx.actor,
-        "created",
+        EventKind::Created,
         None,
         None,
         Some(&args.title),
@@ -246,7 +248,7 @@ pub fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
         for name in &args.status {
             let mark = match known_project {
                 Some(pid) => bind(&mut vals, status::resolve(conn, pid, name)?),
-                None => bind(&mut vals, status::any_project(conn, name)?),
+                None => bind(&mut vals, status::check_known_name(conn, name)?),
             };
             marks.push(mark);
         }
@@ -374,7 +376,7 @@ pub fn show(ctx: &Ctx, args: KeyArg) -> Result<()> {
 }
 
 pub fn edit(ctx: &Ctx, args: EditArgs) -> Result<()> {
-    let tx = write_tx(&ctx.conn)?;
+    let tx = db::write_tx(&ctx.conn)?;
     let item = db::item(&tx, &args.key)?;
     let nothing = args.title.is_none()
         && args.body.is_none()
@@ -397,7 +399,7 @@ pub fn edit(ctx: &Ctx, args: EditArgs) -> Result<()> {
     if let Some(due) = &args.due {
         check_date(due)?;
     }
-    let before = get(&tx, item.id)?;
+    let before = snapshot(&tx, item.id)?;
     let mut sets: Vec<String> = Vec::new();
     let mut vals: Vec<SqlValue> = Vec::new();
     let mut set = |col: &str, v: SqlValue| {
@@ -473,17 +475,17 @@ pub fn edit(ctx: &Ctx, args: EditArgs) -> Result<()> {
         params_from_iter(vals.iter()),
     )?;
     attr::set_values(&tx, item.project_id, item.id, &args.set)?;
-    record_changes(&tx, &ctx.actor, &before, &get(&tx, item.id)?)?;
+    record_changes(&tx, &ctx.actor, &before, &snapshot(&tx, item.id)?)?;
     tx.commit()?;
     let item = get(&ctx.conn, item.id)?;
     output::written(ctx.json, &item, &format!("updated {}", item.id))
 }
 
 pub fn set_status(ctx: &Ctx, args: KeyArg, shortcut: Shortcut) -> Result<()> {
-    let tx = write_tx(&ctx.conn)?;
+    let tx = db::write_tx(&ctx.conn)?;
     let item = db::item(&tx, &args.key)?;
     let status_id = status::for_shortcut(&tx, item.project_id, shortcut)?;
-    let before = get(&tx, item.id)?;
+    let before = snapshot(&tx, item.id)?;
     tx.execute(
         &format!(
             "UPDATE items SET status_id = ?1, updated_at = {} WHERE id = ?2",
@@ -491,7 +493,7 @@ pub fn set_status(ctx: &Ctx, args: KeyArg, shortcut: Shortcut) -> Result<()> {
         ),
         params![status_id, item.id],
     )?;
-    record_changes(&tx, &ctx.actor, &before, &get(&tx, item.id)?)?;
+    record_changes(&tx, &ctx.actor, &before, &snapshot(&tx, item.id)?)?;
     tx.commit()?;
     let item = get(&ctx.conn, item.id)?;
     output::written(
@@ -502,7 +504,7 @@ pub fn set_status(ctx: &Ctx, args: KeyArg, shortcut: Shortcut) -> Result<()> {
 }
 
 pub fn rm(ctx: &Ctx, args: KeyArg) -> Result<()> {
-    let tx = write_tx(&ctx.conn)?;
+    let tx = db::write_tx(&ctx.conn)?;
     let r = db::item(&tx, &args.key)?;
     let item = get(&tx, r.id)?;
     let subtasks: i64 = tx.query_row(
@@ -520,15 +522,6 @@ pub fn rm(ctx: &Ctx, args: KeyArg) -> Result<()> {
         n => format!("deleted {} and {n} subtask(s)", item.id),
     };
     output::written(ctx.json, &item, &line)
-}
-
-/// A transaction that takes the write lock up front, so a read-then-write cannot fail with
-/// SQLITE_BUSY_SNAPSHOT when another agent commits in between (busy_timeout does not retry that).
-fn write_tx(conn: &Connection) -> Result<Transaction<'_>> {
-    Ok(Transaction::new_unchecked(
-        conn,
-        TransactionBehavior::Immediate,
-    )?)
 }
 
 /// One item by row id.
@@ -570,47 +563,54 @@ pub fn query(conn: &Connection, cond: &str, vals: &[SqlValue]) -> Result<Vec<Ite
     Ok(items)
 }
 
+/// A task as history compares it: its fields and its stored attribute values.
+struct Snapshot {
+    item: Item,
+    attrs: BTreeMap<String, String>,
+}
+
+fn snapshot(conn: &Connection, id: i64) -> Result<Snapshot> {
+    Ok(Snapshot {
+        item: get(conn, id)?,
+        attrs: attr::stored_values(conn, id)?,
+    })
+}
+
 /// Record a `changed` event for every built-in field and an `attr` event for every custom
-/// attribute that differs between two snapshots of one task.
-fn record_changes(conn: &Connection, actor: &str, before: &Item, after: &Item) -> Result<()> {
+/// attribute (in name order) that differs between two snapshots of one task.
+fn record_changes(
+    conn: &Connection,
+    actor: &str,
+    before: &Snapshot,
+    after: &Snapshot,
+) -> Result<()> {
+    let (b, a) = (&before.item, &after.item);
     let text = |s: &str| (!s.is_empty()).then(|| s.to_string());
     let fields = [
-        ("title", text(&before.title), text(&after.title)),
-        ("body", text(&before.body), text(&after.body)),
-        ("status", text(&before.status), text(&after.status)),
-        ("priority", text(&before.priority), text(&after.priority)),
-        ("assignee", before.assignee.clone(), after.assignee.clone()),
-        ("due", before.due.clone(), after.due.clone()),
-        (
-            "milestone",
-            before.milestone.clone(),
-            after.milestone.clone(),
-        ),
-        ("parent", before.parent.clone(), after.parent.clone()),
+        ("title", text(&b.title), text(&a.title)),
+        ("body", text(&b.body), text(&a.body)),
+        ("status", text(&b.status), text(&a.status)),
+        ("priority", text(&b.priority), text(&a.priority)),
+        ("assignee", b.assignee.clone(), a.assignee.clone()),
+        ("due", b.due.clone(), a.due.clone()),
+        ("milestone", b.milestone.clone(), a.milestone.clone()),
+        ("parent", b.parent.clone(), a.parent.clone()),
     ];
+    let id = a.row_id;
     for (field, old, new) in fields {
         if old != new {
             let (old, new) = (old.as_deref(), new.as_deref());
-            db::record_event(conn, after.row_id, actor, "changed", Some(field), old, new)?;
+            db::record_event(conn, id, actor, EventKind::Changed, Some(field), old, new)?;
         }
     }
-    let value = |item: &Item, name: &str| {
-        item.attributes.get(name).map(|v| match v {
-            Value::String(s) => s.clone(),
-            v => v.to_string(),
-        })
-    };
-    let names = after.attributes.keys().chain(
-        before
-            .attributes
-            .keys()
-            .filter(|k| !after.attributes.contains_key(*k)),
-    );
+    let mut names: Vec<&String> = before.attrs.keys().chain(after.attrs.keys()).collect();
+    names.sort();
+    names.dedup();
     for name in names {
-        let (old, new) = (value(before, name), value(after, name));
+        let (old, new) = (before.attrs.get(name), after.attrs.get(name));
         if old != new {
-            let (old, new) = (old.as_deref(), new.as_deref());
-            db::record_event(conn, after.row_id, actor, "attr", Some(name), old, new)?;
+            let (old, new) = (old.map(String::as_str), new.map(String::as_str));
+            db::record_event(conn, id, actor, EventKind::Attr, Some(name), old, new)?;
         }
     }
     Ok(())

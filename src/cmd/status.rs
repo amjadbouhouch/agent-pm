@@ -2,11 +2,11 @@
 //! Tasks reference a status by id, so renaming a status renames it on every task.
 
 use clap::Subcommand;
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
 use super::{Ctx, project};
-use crate::db;
+use crate::db::{self, EventKind, write_tx};
 use crate::error::{AppError, Result, err};
 use crate::model::Category;
 use crate::output;
@@ -121,18 +121,22 @@ pub fn seed(conn: &Connection, project_id: i64) -> Result<()> {
 /// Status id for a name within a project, case-insensitive. Used by item add/edit/list.
 pub fn resolve(conn: &Connection, project_id: i64, name: &str) -> Result<i64> {
     let name = name.trim();
-    conn.query_row(
-        "SELECT id FROM statuses WHERE project_id = ?1 AND name = ?2 COLLATE NOCASE",
-        params![project_id, name],
-        |r| r.get(0),
-    )
-    .optional()?
-    .ok_or_else(|| err(format!("no such status: {name}")))
+    find(conn, project_id, name)?.ok_or_else(|| err(format!("no such status: {name}")))
 }
 
-/// A status name as given, if any project has a status by that name (case-insensitive).
-/// Used by `list --status` without a project.
-pub fn any_project(conn: &Connection, name: &str) -> Result<String> {
+fn find(conn: &Connection, project_id: i64, name: &str) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM statuses WHERE project_id = ?1 AND name = ?2 COLLATE NOCASE",
+            params![project_id, name],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// The name, trimmed, if some project has a status by that name (case-insensitive); else a
+/// `no such status` error. Used by `list --status` without a project.
+pub fn check_known_name(conn: &Connection, name: &str) -> Result<String> {
     let name = name.trim();
     let known: bool = conn.query_row(
         "SELECT count(*) > 0 FROM statuses WHERE name = ?1 COLLATE NOCASE",
@@ -155,7 +159,7 @@ pub fn for_shortcut(conn: &Connection, project_id: i64, shortcut: Shortcut) -> R
     match shortcut {
         Shortcut::Start => first(conn, project_id, Category::Active),
         Shortcut::Done => first(conn, project_id, Category::Done),
-        Shortcut::Block => resolve(conn, project_id, "blocked").map_err(|_| {
+        Shortcut::Block => find(conn, project_id, "blocked")?.ok_or_else(|| {
             err(format!(
                 "project {} has no status named blocked",
                 project_key(conn, project_id)
@@ -255,13 +259,6 @@ fn check_position(position: Option<i64>) -> Result<()> {
 
 fn already_exists(name: &str) -> AppError {
     err(format!("status already exists: {name}"))
-}
-
-fn write_tx(conn: &Connection) -> Result<Transaction<'_>> {
-    Ok(Transaction::new_unchecked(
-        conn,
-        TransactionBehavior::Immediate,
-    )?)
 }
 
 fn list(ctx: &Ctx, project: &str) -> Result<()> {
@@ -400,7 +397,7 @@ fn move_tasks(tx: &Connection, actor: &str, from: &Status, to: &Status) -> Resul
             tx,
             item_id,
             actor,
-            "changed",
+            EventKind::Changed,
             Some("status"),
             Some(&from.name),
             Some(&to.name),

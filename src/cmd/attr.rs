@@ -1,6 +1,6 @@
 //! Custom attributes: per-project typed fields on tasks.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use clap::{Subcommand, ValueEnum};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -393,6 +393,17 @@ pub fn values_for_item(conn: &Connection, item_id: i64) -> Result<Map<String, Va
         out.insert(name, typed);
     }
     Ok(out)
+}
+
+/// A task's attribute values as stored (normalized text), by attribute name. Used by history.
+pub fn stored_values(conn: &Connection, item_id: i64) -> Result<BTreeMap<String, String>> {
+    let mut stmt = conn.prepare(
+        "SELECT a.name, v.value FROM item_values v
+         JOIN attributes a ON a.id = v.attribute_id
+         WHERE v.item_id = ?1",
+    )?;
+    let rows = stmt.query_map(params![item_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 /// A stored number as JSON: integers stay integers (`2`, not `2.0`).

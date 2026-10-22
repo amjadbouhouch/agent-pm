@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::error::{AppError, Result, err};
 
@@ -32,9 +32,10 @@ pub fn open(path: &Path) -> Result<Connection> {
     }
     let mut conn = Connection::open(path)?;
     // WAL + busy timeout: several agents may write at once.
+    // The timeout first: switching to WAL and migrating both wait for other writers.
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
-    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     migrate(&mut conn)?;
     Ok(conn)
 }
@@ -113,8 +114,9 @@ CREATE TABLE comments (
 );
 CREATE INDEX comments_item ON comments(item_id);
 "#,
-    // v2: per-project statuses (items.status text -> status_id), history, links, tags, aliases.
-    // Rebuilds `items` (SQLite cannot drop its CHECK): `migrate` turns foreign keys off around
+    // v2: per-project statuses (items.status text -> status_id), the `datetime` attribute type,
+    // history, links, tags, aliases.
+    // Rebuilds `items` and `attributes` (SQLite cannot alter a CHECK): `migrate` turns foreign keys off around
     // it and runs `foreign_key_check` before commit, per SQLite's 12-step ALTER procedure.
     r#"
 CREATE TABLE statuses (
@@ -161,6 +163,22 @@ CREATE INDEX items_parent ON items(parent_id);
 CREATE INDEX items_milestone ON items(milestone_id);
 CREATE INDEX items_status ON items(status_id);
 
+-- Same rebuild for `attributes`, to allow the `datetime` type.
+CREATE TABLE new_attributes (
+    id         INTEGER PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    type       TEXT NOT NULL
+               CHECK (type IN ('text', 'number', 'select', 'date', 'datetime', 'checkbox')),
+    options    TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    UNIQUE (project_id, name)
+);
+INSERT INTO new_attributes (id, project_id, name, type, options, created_at)
+    SELECT id, project_id, name, type, options, created_at FROM attributes;
+DROP TABLE attributes;
+ALTER TABLE new_attributes RENAME TO attributes;
+
 CREATE TABLE events (
     id      INTEGER PRIMARY KEY,
     item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
@@ -184,7 +202,7 @@ CREATE INDEX links_to ON links(to_id);
 
 CREATE TABLE tags (
     item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
-    tag     TEXT NOT NULL,
+    tag     TEXT NOT NULL CHECK (tag = lower(tag)),
     PRIMARY KEY (item_id, tag)
 );
 CREATE INDEX tags_tag ON tags(tag);
@@ -224,14 +242,21 @@ fn migrate(conn: &mut Connection) -> Result<()> {
     // would cascade-delete their children. The pragma is a no-op inside a transaction, so it
     // is switched here and every migration checks the keys itself before committing.
     conn.pragma_update(None, "foreign_keys", "OFF")?;
-    let res = apply(conn, current);
+    let res = apply(conn);
     conn.pragma_update(None, "foreign_keys", "ON")?;
     res
 }
 
-fn apply(conn: &mut Connection, current: usize) -> Result<()> {
-    for (i, sql) in MIGRATIONS.iter().enumerate().skip(current) {
-        let tx = conn.transaction()?;
+/// Apply pending migrations one per transaction. Each takes the write lock first and re-reads
+/// the version inside it, so when several agents open an old database at once, one migrates
+/// and the others find the work done.
+fn apply(conn: &mut Connection) -> Result<()> {
+    loop {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let i = schema_version(&tx)? as usize;
+        let Some(sql) = MIGRATIONS.get(i) else {
+            return Ok(());
+        };
         tx.execute_batch(sql)?;
         let broken: bool = tx.query_row(
             "SELECT count(*) > 0 FROM pragma_foreign_key_check",
@@ -247,18 +272,49 @@ fn apply(conn: &mut Connection, current: usize) -> Result<()> {
         tx.pragma_update(None, "user_version", (i + 1) as i64)?;
         tx.commit()?;
     }
-    Ok(())
+}
+
+/// A transaction that takes the write lock up front, so a read-then-write cannot fail with
+/// SQLITE_BUSY_SNAPSHOT when another agent commits in between (busy_timeout does not retry that).
+pub fn write_tx(conn: &Connection) -> Result<Transaction<'_>> {
+    Ok(Transaction::new_unchecked(
+        conn,
+        TransactionBehavior::Immediate,
+    )?)
+}
+
+/// What a history event records; stored as `events.kind`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventKind {
+    /// The task was created; new = title.
+    Created,
+    /// A built-in field changed; field = its name, old/new as shown (status name, milestone
+    /// name, parent KEY-N), None = empty.
+    Changed,
+    /// A custom attribute changed; field = attribute name, old/new = stored values,
+    /// None = unset.
+    Attr,
+    /// A comment was added; new = its text.
+    Commented,
+}
+
+impl EventKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EventKind::Created => "created",
+            EventKind::Changed => "changed",
+            EventKind::Attr => "attr",
+            EventKind::Commented => "commented",
+        }
+    }
 }
 
 /// Record one history event on a task. Call it inside the mutation's transaction.
-/// Kinds: `created` (new = title); `changed` (field = a built-in field, old/new as shown:
-/// status name, milestone name, parent KEY-N; None = empty); `attr` (field = attribute name,
-/// old/new = stored values, None = unset); `commented` (new = comment text).
 pub fn record_event(
     conn: &Connection,
     item_id: i64,
     actor: &str,
-    kind: &str,
+    kind: EventKind,
     field: Option<&str>,
     old: Option<&str>,
     new: Option<&str>,
@@ -266,7 +322,7 @@ pub fn record_event(
     conn.execute(
         "INSERT INTO events (item_id, actor, kind, field, old, new)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![item_id, actor, kind, field, old, new],
+        params![item_id, actor, kind.as_str(), field, old, new],
     )?;
     Ok(())
 }

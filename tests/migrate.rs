@@ -113,6 +113,8 @@ INSERT INTO comments (id, item_id, author, body, created_at) VALUES
 fn v1_env() -> Env {
     let env = Env::new();
     let conn = rusqlite::Connection::open(env.db_path()).unwrap();
+    // apm v1 switched every database to WAL on open, and the mode persists in the file.
+    conn.pragma_update(None, "journal_mode", "WAL").unwrap();
     conn.execute_batch(V1).unwrap();
     conn.execute_batch(V1_DATA).unwrap();
     conn.pragma_update(None, "user_version", 1).unwrap();
@@ -211,6 +213,91 @@ fn v1_database_upgrades_to_v2() {
     for table in ["links", "tags", "project_aliases", "item_aliases"] {
         assert_eq!(count(&env, &format!("SELECT count(*) FROM {table}")), 0);
     }
+}
+
+#[test]
+fn v1_attributes_survive_the_rebuild() {
+    let env = v1_env();
+    let attrs = env.json(&["attr", "list", "-p", "APM"]);
+    assert_eq!(
+        attrs,
+        json!([
+            {"name": "points", "project": "APM", "type": "number", "options": []},
+            {"name": "size", "project": "APM", "type": "select", "options": ["s", "m", "l"]},
+        ])
+    );
+    let conn = env.conn();
+    let rows: Vec<(i64, i64, String)> = conn
+        .prepare(
+            "SELECT item_id, attribute_id, value FROM item_values ORDER BY item_id, attribute_id",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let s = |v: &str| v.to_string();
+    assert_eq!(rows, [(10, 2, s("3")), (10, 5, s("m")), (11, 2, s("1"))]);
+    // Values still follow their attribute and their task.
+    let fks: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM pragma_foreign_key_list('item_values')
+             WHERE \"table\" IN ('items', 'attributes') AND on_delete = 'CASCADE'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(fks, 2);
+    // The schema now accepts the `datetime` type (B1 adds it to the CLI).
+    conn.execute(
+        "INSERT INTO attributes (project_id, name, type) VALUES (3, 'at', 'datetime')",
+        [],
+    )
+    .unwrap();
+    assert!(
+        conn.execute(
+            "INSERT INTO attributes (project_id, name, type) VALUES (3, 'x', 'time')",
+            [],
+        )
+        .is_err()
+    );
+    // Tags are stored lowercase.
+    assert!(
+        conn.execute("INSERT INTO tags (item_id, tag) VALUES (10, 'Ui')", [])
+            .is_err()
+    );
+    conn.execute("INSERT INTO tags (item_id, tag) VALUES (10, 'ui')", [])
+        .unwrap();
+    drop(conn);
+    env.json(&["attr", "rm", "points", "-p", "APM"]);
+    assert_eq!(count(&env, "SELECT count(*) FROM item_values"), 1);
+}
+
+#[test]
+fn concurrent_first_opens_migrate_once() {
+    let env = v1_env();
+    let workers: Vec<_> = (0..8)
+        .map(|_| {
+            let db = env.db_path();
+            std::thread::spawn(move || {
+                let out = std::process::Command::new(env!("CARGO_BIN_EXE_apm"))
+                    .env("APM_DB", &db)
+                    .env("APM_AGENT", "tester")
+                    .args(["--json", "db"])
+                    .output()
+                    .unwrap();
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                assert!(out.status.success(), "{stderr}");
+                let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+                assert_eq!(v["schema_version"], 2);
+            })
+        })
+        .collect();
+    for w in workers {
+        w.join().unwrap();
+    }
+    assert_eq!(count(&env, "SELECT count(*) FROM statuses"), 10);
+    assert_eq!(count(&env, "SELECT count(*) FROM items"), 6);
 }
 
 #[test]

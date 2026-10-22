@@ -3,8 +3,9 @@ use rusqlite::{Connection, params};
 use serde::Serialize;
 
 use super::Ctx;
+use crate::db::{self, EventKind};
 use crate::error::{Result, err};
-use crate::{db, output};
+use crate::output;
 
 #[derive(Args, Debug)]
 pub struct CommentArgs {
@@ -40,12 +41,12 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Comment> {
 
 /// `apm comment KEY-N <text>`: add a comment authored by the actor.
 pub fn run(ctx: &Ctx, args: CommentArgs) -> Result<()> {
-    let item = db::item(&ctx.conn, &args.key)?;
     if args.text.trim().is_empty() {
         return Err(err("comment text cannot be empty"));
     }
     // A comment is activity on the task: bump its updated_at in the same transaction.
-    let tx = ctx.conn.unchecked_transaction()?;
+    let tx = db::write_tx(&ctx.conn)?;
+    let item = db::item(&tx, &args.key)?;
     tx.execute(
         "INSERT INTO comments (item_id, author, body) VALUES (?1, ?2, ?3)",
         params![item.id, ctx.actor, args.text],
@@ -55,7 +56,7 @@ pub fn run(ctx: &Ctx, args: CommentArgs) -> Result<()> {
         &tx,
         item.id,
         &ctx.actor,
-        "commented",
+        EventKind::Commented,
         None,
         None,
         Some(&args.text),

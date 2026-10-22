@@ -174,6 +174,38 @@ fn status_rm_records_moved_tasks() {
 }
 
 #[test]
+fn milestone_rm_records_cleared_tasks() {
+    let env = env_apm();
+    env.json(&["add", "a", "-p", "APM", "-m", "v1"]);
+    env.json(&["add", "b", "-p", "APM"]);
+    env.json(&["--as", "frank", "milestone", "rm", "v1", "-p", "APM"]);
+    assert_eq!(
+        events(&env, "APM", 1)[1],
+        ev("frank", "changed", Some("milestone"), Some("v1"), None)
+    );
+    assert_eq!(events(&env, "APM", 2).len(), 1);
+    assert_eq!(
+        env.json(&["show", "APM-1"])["milestone"],
+        serde_json::Value::Null
+    );
+}
+
+#[test]
+fn attr_events_hold_stored_values() {
+    let env = env_apm();
+    env.json(&["attr", "add", "flag", "-p", "APM", "--type", "checkbox"]);
+    env.json(&["add", "t", "-p", "APM"]);
+    env.json(&["edit", "APM-1", "--set", "flag=yes", "--set", "points=2.50"]);
+    assert_eq!(
+        events(&env, "APM", 1)[1..],
+        [
+            ev("tester", "attr", Some("flag"), None, Some("true")),
+            ev("tester", "attr", Some("points"), None, Some("2.5")),
+        ]
+    );
+}
+
+#[test]
 fn events_go_with_their_task() {
     let env = env_apm();
     env.json(&["add", "a", "-p", "APM"]);
