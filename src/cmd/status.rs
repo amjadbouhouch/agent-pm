@@ -5,7 +5,7 @@ use clap::Subcommand;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
-use super::{Ctx, project};
+use super::{Ctx, claim, project};
 use crate::db::{self, EventKind, write_tx};
 use crate::error::{AppError, Result, err};
 use crate::model::Category;
@@ -333,6 +333,17 @@ fn edit(
         || already_exists(rename.unwrap_or(name)),
     )?;
     place(&tx, project_id, id, position)?;
+    if category.is_some_and(Category::is_closed) {
+        // Its tasks are closed now: they keep no claims.
+        let mut stmt = tx.prepare("SELECT id FROM items WHERE status_id = ?1")?;
+        let ids = stmt
+            .query_map(params![id], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<i64>>>()?;
+        drop(stmt);
+        for item_id in ids {
+            claim::release_if_closed(&tx, &ctx.actor, item_id)?;
+        }
+    }
     tx.commit()?;
     let s = load(&ctx.conn, id)?;
     output::written(ctx.json, &s, &format!("updated status {}", s.name))
@@ -403,6 +414,7 @@ fn move_tasks(tx: &Connection, actor: &str, from: &Status, to: &Status) -> Resul
             Some(&from.name),
             Some(&to.name),
         )?;
+        claim::release_if_closed(tx, actor, item_id)?;
     }
     Ok(())
 }

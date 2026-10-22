@@ -9,6 +9,7 @@ SETUP
 JSON CONTRACT (--json, works on every command)
   Success: one JSON object or array on stdout. Writes return the written object.
   Errors:  {"error": "<msg>"} on stderr. Exit 1 = command failed, 2 = invalid arguments.
+  `next` exits 3 when no task is ready: {"task": null} (text: `nothing ready`).
   Without --json: short text lines, errors as `error: <msg>`. apm never prompts.
 
 IDS
@@ -71,6 +72,14 @@ SEARCH, SORT, DUE
   apm list --due-after 2026-11-01 --due-before 2026-12-01   # strict bounds
   apm list --overdue                                 # open tasks due before now
 
+AGENT LOOP (agents sharing a project each get their own task)
+  apm add "release notes" -p APM --priority urgent
+  apm next -p APM --as bot                           # claim + assign + start the best ready task
+  apm comment APM-4 "draft in docs/notes.md" --as bot
+  apm claim APM-4 --ttl 4h --as bot                  # renew (default 2h, max 7d)
+  apm claims -p APM --mine --as bot                  # live claims, soonest expiry first
+  apm done APM-4 --as bot                            # closing a task releases its claim
+
 VALUES
   Status:   a status of the task's project; JSON has `status` and `status_category`.
   Category: todo | active | done | cancelled. New tasks get the first todo status;
@@ -84,6 +93,8 @@ VALUES
   Checkbox: true/false/yes/no/1/0. Date attributes: YYYY-MM-DD; datetime: like due.
   `list` hides done/cancelled-category tasks unless --all or --status.
   Blocked: open, with an open blocker or in a status named blocked; else --ready.
+  Next:     a ready task not claimed by another agent, unassigned or yours; highest
+            priority, then soonest due, then id. A claim expires on its own (no sweeper).
 
 COMMANDS
   project add|list|show|edit|rm   manage projects (edit --key re-keys; rm deletes all in it)
@@ -94,6 +105,8 @@ COMMANDS
   tags | history KEY-N            tag counts (-p KEY); a task's events (--limit N)
   start | done | block            status shortcuts
   move KEY-N PROJECT              move a task and its subtasks, renumbered in PROJECT
+  next | claim | release KEY-N    claim work (--ttl; claim --steal, release --force)
+  claims                          live claims (-p KEY, --mine); list --claimed/--unclaimed
   status list|add|edit|rm         custom statuses, -p KEY; a project keeps at least one
   milestone add|list|show|edit|close|reopen|rm   -p KEY; rm keeps its tasks
   attr add|edit|list|rm           custom attributes, -p KEY; edit --rename
