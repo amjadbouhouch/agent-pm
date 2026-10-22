@@ -35,7 +35,7 @@ WORKFLOW
 
 CUSTOM ATTRIBUTES
   apm attr add size -p APM --type select --options s,m,l
-  apm attr add points -p APM --type number           # types: text number select date checkbox
+  apm attr add points -p APM --type number    # types: text number select date datetime checkbox
   apm add "cache layer" -p APM --set size=m --set points=3
   apm list -p APM --where size=m
   apm edit APM-3 --unset points
@@ -64,6 +64,12 @@ MOVE AND RENAME (old task ids and project keys keep resolving)
   apm project edit OPS --key INFRA                   # OPS-1 is now INFRA-1
   apm attr edit points -p APM --rename estimate
 
+SEARCH, SORT, DUE
+  apm edit APM-1 --due 2026-11-20T17:00+01:00        # date or date-time; stored in UTC
+  apm list --search "clap" --sort -priority,due --limit 5   # title, body, comments
+  apm list --due-after 2026-11-01 --due-before 2026-12-01   # strict bounds
+  apm list --overdue                                 # open tasks due before now
+
 VALUES
   Status:   a status of the task's project; JSON has `status` and `status_category`.
   Category: todo | active | done | cancelled. New tasks get the first todo status;
@@ -71,13 +77,18 @@ VALUES
   Priority: none (default) | low | medium | high | urgent
   Text:     bodies and comments are Markdown by convention, stored verbatim. Long text:
             -b - (stdin) or --body-file PATH on add/edit; comment KEY-N - or --file PATH.
-  Dates:    YYYY-MM-DD. Checkbox: true/false/yes/no/1/0.
+  Due:      YYYY-MM-DD, or YYYY-MM-DDTHH:MM[:SS] with Z or ±HH:MM (stored as UTC ...Z).
+            A date bound (--due-before/--due-after) compares the UTC date part of a due.
+  Sort:     id created updated due priority status title; -key = descending; no due last.
+  Checkbox: true/false/yes/no/1/0. Date attributes: YYYY-MM-DD; datetime: like due.
   `list` hides done/cancelled-category tasks unless --all or --status.
   Blocked: open, with an open blocker or in a status named blocked; else --ready.
 
 COMMANDS
   project add|list|show|edit|rm   manage projects (edit --key re-keys; rm deletes all in it)
   add | list | show | edit | rm   tasks; filters: -p --status -a -m --parent --where --tag
+                                  --ready --blocked --search --due-before --due-after
+                                  --overdue; --sort --limit
   link | unlink A KIND B          blocks (no cycles), relates, duplicates; show lists both ends
   tags | history KEY-N            tag counts (-p KEY); a task's events (--limit N)
   start | done | block            status shortcuts
