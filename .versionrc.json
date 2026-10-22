@@ -1,0 +1,19 @@
+{
+  "packageFiles": [{ "filename": "Cargo.toml", "updater": "scripts/version-updater.cjs" }],
+  "bumpFiles": [
+    { "filename": "Cargo.toml", "updater": "scripts/version-updater.cjs" },
+    { "filename": "Cargo.lock", "updater": "scripts/version-updater.cjs" }
+  ],
+  "types": [
+    { "type": "feat", "section": "Features" },
+    { "type": "fix", "section": "Bug Fixes" },
+    { "type": "perf", "section": "Performance" },
+    { "type": "refactor", "section": "Refactoring" },
+    { "type": "docs", "section": "Documentation" },
+    { "type": "test", "hidden": true },
+    { "type": "chore", "hidden": true },
+    { "type": "ci", "hidden": true }
+  ],
+  "commitUrlFormat": "https://github.com/amjadbouhouch/agent-pm/commit/{{hash}}",
+  "compareUrlFormat": "https://github.com/amjadbouhouch/agent-pm/compare/{{previousTag}}...{{currentTag}}"
+}

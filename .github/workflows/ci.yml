@@ -1,21 +1,36 @@
-name: ci
+name: CI
 
+# Releases are gated by the test job in release.yml, so this does not duplicate
+# it on every push. It covers pull requests and manual runs.
 on:
-  push:
-    branches: [main]
   pull_request:
-    branches: [main]
   workflow_dispatch:
 
 jobs:
-  check:
-    runs-on: ubuntu-latest
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+
       - uses: Swatinem/rust-cache@v2
+
       - run: cargo fmt --check
+
       - run: cargo clippy --all-targets -- -D warnings
+
       - run: cargo test
+
+      - name: Verify the release build compiles
+        run: cargo build --release --locked
+
+      - name: Verify install.sh is valid POSIX sh
+        if: runner.os != 'Windows'
+        run: sh -n install.sh

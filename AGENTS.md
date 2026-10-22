@@ -40,6 +40,8 @@ src/db.rs          db path, schema migrations, shared lookups (project_id, item 
 src/model.rs       Status, Priority, name=value parsing, date check
 src/output.rs      JSON printing, errors, text tables
 tests/             integration tests (run the real binary on a temp DB)
+install.sh         installer for release binaries (POSIX sh)
+scripts/           version-updater.cjs for commit-and-tag-version
 ```
 
 ## Conventions
@@ -62,4 +64,36 @@ tests/             integration tests (run the real binary on a temp DB)
 
 - Merge target: `main`. Work on a branch; the orchestrator reviews and merges locally
   (`git merge --no-ff`) and pushes `main`. Workers don't push `main`.
-- Commits: short imperative subject (`add milestone commands`).
+- Commits: [Conventional Commits](https://www.conventionalcommits.org) with a short imperative
+  subject (`feat: add milestone commands`, `fix(item): ...`, `docs: ...`). The release tool
+  derives the version and changelog from them, so a wrong prefix ships a wrong version.
+
+## Releasing
+
+```sh
+npx commit-and-tag-version --dry-run          # preview the bump and changelog
+npx commit-and-tag-version                    # bump, write CHANGELOG.md, commit, tag vX.Y.Z
+git push --follow-tags origin main            # the tag push triggers release.yml
+```
+
+The first release is `0.1.0` (already in Cargo.toml): use `--first-release`, which tags
+the current version without bumping. There is no package.json; `.versionrc.json` points the
+tool at `Cargo.toml` and `Cargo.lock` through `scripts/version-updater.cjs`, which rewrites
+only the `[package]` version and the lockfile's `apm` entry, so `--locked` builds keep
+passing after a bump.
+
+While the version is below 1.0.0, `feat:` bumps the **patch** and only `feat!:` /
+`BREAKING CHANGE:` bumps the minor. Override with `--release-as minor`.
+
+`release.yml` runs fmt, clippy and the tests in a `test` job that `build` depends on, so a
+tag whose tests fail publishes nothing. `build` compiles on native runners and uploads
+`apm-<os>-<arch>` (`apm-windows-x64.exe` on Windows) plus a `.sha256` for each; `publish`
+creates the GitHub release. A manual run (`workflow_dispatch` with `tag`) rebuilds an
+existing tag. `ci.yml` covers pull requests and manual runs only, on Linux, macOS and Windows.
+
+`install.sh` downloads the asset for the platform from `uname`, verifies the checksum, runs
+`--version` before replacing anything, and offers to edit the shell profile (prompting via
+`/dev/tty`, since stdin is the script under `curl | sh`). `--uninstall` removes only the
+binary: `~/.agent-pm` also holds the database. `tests/release_assets.rs` runs it against a
+stubbed `uname` for all four platforms and asserts every asset it requests is in
+`release.yml`, and that Cargo.toml, Cargo.lock and `apm --version` agree.
