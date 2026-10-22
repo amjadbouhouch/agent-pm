@@ -107,12 +107,19 @@ impl Attr {
     }
 
     /// Validate `value` for this attribute and return its stored form. Normalized, so equal
-    /// values compare equal as text (`yes` -> `true`, `2.0` -> `2`).
+    /// values compare equal as text (`yes` -> `true`, `2.0` -> `2`). Only text keeps
+    /// surrounding whitespace.
     fn normalize(&self, value: &str) -> Result<String> {
         let bad = |why: String| err(format!("invalid value for {}: {why}", self.name));
+        if self.kind == AttrType::Text {
+            return Ok(value.to_string());
+        }
+        let value = value.trim();
         match self.kind {
-            AttrType::Text => Ok(value.to_string()),
-            AttrType::Number => match value.trim().parse::<f64>() {
+            AttrType::Text => unreachable!("returned above"),
+            // Numbers are f64: integers beyond 2^53 lose precision. `-0` is stored as `0`.
+            AttrType::Number => match value.parse::<f64>() {
+                Ok(0.0) => Ok("0".to_string()),
                 Ok(n) if n.is_finite() => Ok(n.to_string()),
                 _ => Err(bad(format!("expected a number, got `{value}`"))),
             },
@@ -120,7 +127,7 @@ impl Attr {
                 model::check_date(value).map_err(|e| bad(e.0))?;
                 Ok(value.to_string())
             }
-            AttrType::Checkbox => match value.trim().to_lowercase().as_str() {
+            AttrType::Checkbox => match value.to_lowercase().as_str() {
                 "true" | "yes" | "1" => Ok("true".to_string()),
                 "false" | "no" | "0" => Ok("false".to_string()),
                 _ => Err(bad(format!("expected true/false, got `{value}`"))),
@@ -162,14 +169,6 @@ fn find(conn: &Connection, project_id: i64, name: &str) -> Result<Option<Attr>> 
     .transpose()
 }
 
-fn project_key(conn: &Connection, project_id: i64) -> Result<String> {
-    Ok(conn.query_row(
-        "SELECT key FROM projects WHERE id = ?1",
-        params![project_id],
-        |r| r.get(0),
-    )?)
-}
-
 pub fn run(ctx: &Ctx, cmd: AttrCmd) -> Result<()> {
     match cmd {
         AttrCmd::Add {
@@ -193,7 +192,7 @@ fn add(ctx: &Ctx, name: &str, project: &str, kind: AttrType, options: Vec<String
         return Err(err(format!("attribute name may not contain `=`: {name}")));
     }
     if BUILT_IN.contains(&name.to_lowercase().as_str()) {
-        return Err(err(format!("{name} is a built-in field")));
+        return Err(err(format!("built-in field: {name}")));
     }
     let options: Vec<String> = options.iter().map(|o| o.trim().to_string()).collect();
     if kind == AttrType::Select {
@@ -213,10 +212,9 @@ fn add(ctx: &Ctx, name: &str, project: &str, kind: AttrType, options: Vec<String
     } else if !options.is_empty() {
         return Err(err("--options is only for select attributes"));
     }
-    if find(&ctx.conn, project_id, name)?.is_some() {
-        return Err(err(format!("attribute already exists: {name}")));
-    }
-    ctx.conn.execute(
+    // The UNIQUE (project_id, name) constraint is the duplicate check, so a concurrent add
+    // of the same name gets the same error.
+    let inserted = ctx.conn.execute(
         "INSERT INTO attributes (project_id, name, type, options) VALUES (?1, ?2, ?3, ?4)",
         params![
             project_id,
@@ -224,10 +222,23 @@ fn add(ctx: &Ctx, name: &str, project: &str, kind: AttrType, options: Vec<String
             kind.as_str(),
             serde_json::to_string(&options)?
         ],
-    )?;
-    let attr = find(&ctx.conn, project_id, name)?.ok_or_else(|| err("attribute vanished"))?;
+    );
+    match inserted {
+        Err(rusqlite::Error::SqliteFailure(e, _))
+            if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
+        {
+            return Err(err(format!("attribute already exists: {name}")));
+        }
+        r => r?,
+    };
+    let attr = Attr {
+        id: ctx.conn.last_insert_rowid(),
+        name: name.to_string(),
+        kind,
+        options,
+    };
     if ctx.json {
-        output::json(&attr.to_json(&project_key(&ctx.conn, project_id)?))
+        output::json(&attr.to_json(&project.to_uppercase()))
     } else {
         println!("added attribute {name}");
         Ok(())
@@ -238,7 +249,7 @@ fn list(ctx: &Ctx, project: &str) -> Result<()> {
     let project_id = db::project_id(&ctx.conn, project)?;
     let attrs = project_attrs(&ctx.conn, project_id)?;
     if ctx.json {
-        let key = project_key(&ctx.conn, project_id)?;
+        let key = project.to_uppercase();
         let all: Vec<Value> = attrs.iter().map(|a| a.to_json(&key)).collect();
         return output::json(&all);
     }
@@ -264,7 +275,7 @@ fn rm(ctx: &Ctx, name: &str, project: &str) -> Result<()> {
     ctx.conn
         .execute("DELETE FROM attributes WHERE id = ?1", params![attr.id])?;
     if ctx.json {
-        output::json(&attr.to_json(&project_key(&ctx.conn, project_id)?))
+        output::json(&attr.to_json(&project.to_uppercase()))
     } else {
         println!("removed attribute {name}");
         Ok(())
@@ -272,7 +283,9 @@ fn rm(ctx: &Ctx, name: &str, project: &str) -> Result<()> {
 }
 
 /// Validate and store `name=value` pairs on a task. Used by item add/edit.
-/// All-or-nothing: every pair is validated before anything is written.
+/// Every pair is validated before anything is written, so a bad pair writes nothing. The writes
+/// themselves are atomic only if the caller holds a transaction (pass `&tx`, it derefs to
+/// `&Connection`); this function opens none.
 pub fn set_values(
     conn: &Connection,
     project_id: i64,
@@ -487,6 +500,10 @@ mod tests {
                 .contains("expected true/false")
         );
         assert!(e("note", "").is_none());
+        assert!(e("when", " 2026-10-22 ").is_none());
+        assert!(e("size", " m ").is_none());
+        assert!(e("flag", "TRUE").is_none());
+        assert!(e("flag", "NO").is_none());
         // Another project's attribute is unknown here.
         assert!(set_values(&conn, 2, 3, &pairs(&[("size", "m")])).is_err());
     }
@@ -550,6 +567,41 @@ mod tests {
                 .unwrap_err()
                 .0,
             "unknown attribute: flag"
+        );
+    }
+
+    #[test]
+    fn values_are_trimmed_except_text() {
+        let conn = setup();
+        set_values(
+            &conn,
+            1,
+            1,
+            &pairs(&[
+                ("note", " x "),
+                ("size", " l"),
+                ("when", "2026-01-02 "),
+                ("flag", " NO "),
+                ("points", " -0 "),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            Value::Object(values_for_item(&conn, 1).unwrap()),
+            json!({"note": " x ", "size": "l", "when": "2026-01-02", "flag": false, "points": 0})
+        );
+        assert_eq!(
+            filter(
+                &conn,
+                Some(1),
+                &pairs(&[("points", "0"), ("flag", "False")])
+            )
+            .unwrap(),
+            ids(&[1])
+        );
+        assert_eq!(
+            filter(&conn, Some(1), &pairs(&[("points", "-0.0")])).unwrap(),
+            ids(&[1])
         );
     }
 

@@ -71,11 +71,20 @@ fn add_rejects_bad_names() {
     let env = env();
     let add = |name: &str| env.json_err(&["attr", "add", name, "-p", "APM", "--type", "text"]);
     assert_eq!(add("  "), "attribute name is empty");
-    assert_eq!(add("status"), "status is a built-in field");
-    assert_eq!(add("Due"), "Due is a built-in field");
+    assert_eq!(add("status"), "built-in field: status");
+    assert_eq!(add("Due"), "built-in field: Due");
     assert!(add("a=b").contains("may not contain `=`"));
     env.json(&["attr", "add", "note", "-p", "APM", "--type", "text"]);
     assert_eq!(add("note"), "attribute already exists: note");
+    assert_eq!(add(" note "), "attribute already exists: note");
+}
+
+#[test]
+fn add_trims_name() {
+    let env = env();
+    let v = env.json(&["attr", "add", " note ", "-p", "APM", "--type", "text"]);
+    assert_eq!(v["name"], "note");
+    env.json(&["attr", "rm", "note", "-p", "APM"]);
 }
 
 #[test]
