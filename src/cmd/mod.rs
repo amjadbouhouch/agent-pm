@@ -4,10 +4,13 @@ pub mod attr;
 pub mod comment;
 pub mod db;
 pub mod guide;
+pub mod history;
 pub mod item;
+pub mod link;
 pub mod milestone;
 pub mod project;
 pub mod status;
+pub mod tag;
 
 use rusqlite::Connection;
 
@@ -46,6 +49,10 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Status(c) => status::run(&ctx, c),
         Command::Attr(c) => attr::run(&ctx, c),
         Command::Comment(a) => comment::run(&ctx, a),
+        Command::Link(a) => link::link(&ctx, a),
+        Command::Unlink(a) => link::unlink(&ctx, a),
+        Command::Tags(a) => tag::run(&ctx, a),
+        Command::History(a) => history::run(&ctx, a),
         Command::Db => db::run(&ctx, &path),
         Command::Guide => unreachable!("handled before opening the database"),
     }

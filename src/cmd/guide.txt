@@ -47,6 +47,15 @@ STATUSES
   apm edit APM-3 --status Review                     # names are case-insensitive
   apm status rm blocked -p APM --to review           # --to moves its tasks first
 
+LINKS, TAGS, HISTORY
+  apm link APM-1 blocks APM-3                        # kinds: blocks relates duplicates
+  apm list -p APM --ready                            # open, no open blocker (or --blocked)
+  apm edit APM-3 --tag perf --untag wip              # tags: lowercase a-z 0-9 _ : . -
+  apm list --tag perf                                # repeatable: all must match
+  apm tags -p APM                                    # tags by count
+  apm history APM-3 --limit 5                        # latest 5 events, oldest first
+  apm unlink APM-1 blocks APM-3
+
 VALUES
   Status:   a status of the task's project; JSON has `status` and `status_category`.
   Category: todo | active | done | cancelled. New tasks get the first todo status;
@@ -57,7 +66,9 @@ VALUES
 
 COMMANDS
   project add|list|show|edit|rm   manage projects (rm deletes everything in it)
-  add | list | show | edit | rm   tasks; filters: -p --status -a -m --parent --where
+  add | list | show | edit | rm   tasks; filters: -p --status -a -m --parent --where --tag
+  link | unlink A KIND B          blocks (no cycles), relates, duplicates; show lists both ends
+  tags | history KEY-N            tag counts (-p KEY); a task's events (--limit N)
   start | done | block            status shortcuts
   status list|add|edit|rm         custom statuses, -p KEY; a project keeps at least one
   milestone add|list|show|edit|close|reopen|rm   -p KEY; rm keeps its tasks
