@@ -22,9 +22,12 @@ pub enum ProjectCmd {
     List,
     /// Show a project with its task counts
     Show { key: String },
-    /// Rename or redescribe a project
+    /// Rename, redescribe or re-key a project (the old key keeps working)
     Edit {
         key: String,
+        /// New KEY; task ids follow (APM-3 becomes OPS-3), old ids keep resolving
+        #[arg(long = "key", value_name = "NEW")]
+        new_key: Option<String>,
         #[arg(long)]
         name: Option<String>,
         #[arg(short, long)]
@@ -71,9 +74,16 @@ pub fn run(ctx: &Ctx, cmd: ProjectCmd) -> Result<()> {
         ProjectCmd::Show { key } => show(ctx, &key),
         ProjectCmd::Edit {
             key,
+            new_key,
             name,
             description,
-        } => edit(ctx, &key, name.as_deref(), description.as_deref()),
+        } => edit(
+            ctx,
+            &key,
+            new_key.as_deref(),
+            name.as_deref(),
+            description.as_deref(),
+        ),
         ProjectCmd::Rm { key } => rm(ctx, &key),
     }
 }
@@ -89,6 +99,7 @@ fn add(ctx: &Ctx, key: &str, name: &str, description: Option<&str>) -> Result<()
     let key = db::check_project_key(key)?;
     check_name(name)?;
     let tx = db::write_tx(&ctx.conn)?;
+    db::claim_project_key(&tx, &key)?;
     db::unique(
         tx.execute(
             "INSERT INTO projects (key, name, description) VALUES (?1, ?2, ?3)",
@@ -149,15 +160,42 @@ fn show(ctx: &Ctx, key: &str) -> Result<()> {
     Ok(())
 }
 
-fn edit(ctx: &Ctx, key: &str, name: Option<&str>, description: Option<&str>) -> Result<()> {
-    let id = db::project_id(&ctx.conn, key)?;
-    if name.is_none() && description.is_none() {
-        return Err(err("nothing to change: pass --name or --description"));
+fn edit(
+    ctx: &Ctx,
+    key: &str,
+    new_key: Option<&str>,
+    name: Option<&str>,
+    description: Option<&str>,
+) -> Result<()> {
+    if new_key.is_none() && name.is_none() && description.is_none() {
+        return Err(err(
+            "nothing to change: pass --key, --name or --description",
+        ));
     }
+    let new_key = new_key.map(db::check_project_key).transpose()?;
     if let Some(name) = name {
         check_name(name)?;
     }
-    ctx.conn.execute(
+    let tx = db::write_tx(&ctx.conn)?;
+    let id = db::project_id(&tx, key)?;
+    let old_key = get(&tx, id)?.key;
+    if let Some(new_key) = new_key.as_deref().filter(|k| *k != old_key) {
+        // The new key stops being an alias (of this or another project); the old one becomes
+        // one, so APM-3 keeps finding what is now OPS-3.
+        db::claim_project_key(&tx, new_key)?;
+        db::unique(
+            tx.execute(
+                "UPDATE projects SET key = ?1 WHERE id = ?2",
+                params![new_key, id],
+            ),
+            || err(format!("project already exists: {new_key}")),
+        )?;
+        tx.execute(
+            "INSERT INTO project_aliases (key, project_id) VALUES (?1, ?2)",
+            params![old_key, id],
+        )?;
+    }
+    tx.execute(
         &format!(
             "UPDATE projects SET name = coalesce(?1, name), description = coalesce(?2, description),
              updated_at = {} WHERE id = ?3",
@@ -165,6 +203,7 @@ fn edit(ctx: &Ctx, key: &str, name: Option<&str>, description: Option<&str>) -> 
         ),
         params![name, description, id],
     )?;
+    tx.commit()?;
     let project = get(&ctx.conn, id)?;
     output::written(ctx.json, &project, &format!("updated {}", project.key))
 }

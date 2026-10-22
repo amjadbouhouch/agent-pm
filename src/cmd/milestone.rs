@@ -123,13 +123,18 @@ pub fn run(ctx: &Ctx, cmd: MilestoneCmd) -> Result<()> {
 
 /// Milestone id for a name within a project. Used by item add/edit/list.
 pub fn resolve(conn: &Connection, project_id: i64, name: &str) -> Result<i64> {
-    conn.query_row(
-        "SELECT id FROM milestones WHERE project_id = ?1 AND name = ?2",
-        params![project_id, name],
-        |r| r.get(0),
-    )
-    .optional()?
-    .ok_or_else(|| err(format!("no such milestone: {name}")))
+    lookup(conn, project_id, name)?.ok_or_else(|| err(format!("no such milestone: {name}")))
+}
+
+/// Milestone id for a name within a project, if it has one. Used by `move`.
+pub fn lookup(conn: &Connection, project_id: i64, name: &str) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM milestones WHERE project_id = ?1 AND name = ?2",
+            params![project_id, name],
+            |r| r.get(0),
+        )
+        .optional()?)
 }
 
 /// A milestone with its progress, by id.

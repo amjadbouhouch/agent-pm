@@ -54,12 +54,13 @@ Data lives in `~/.agent-pm/apm.db`; override with `--db PATH` or `$APM_DB`.
 
 | Command | What it does |
 | --- | --- |
-| `project add\|list\|show\|edit\|rm` | Projects, each with a short KEY (`APM`) |
+| `project add\|list\|show\|edit\|rm` | Projects, each with a short KEY (`APM`); `edit --key` re-keys, old ids keep working |
 | `add`, `list`, `show`, `edit`, `rm` | Tasks and subtasks, referenced as `KEY-N` |
 | `start`, `done`, `block` | Status shortcuts |
+| `move KEY-N PROJECT` | Move a task and its subtasks to another project (new numbers, old ids keep working) |
 | `status list\|add\|edit\|rm` | Custom statuses per project, each in a category (todo, active, done, cancelled) |
 | `milestone add\|list\|show\|edit\|close\|reopen\|rm` | Milestones with progress |
-| `attr add\|list\|rm` | Custom attributes (text, number, select, date, checkbox), set with `--set`, filtered with `--where` |
+| `attr add\|edit\|list\|rm` | Custom attributes (text, number, select, date, checkbox), set with `--set`, filtered with `--where` |
 | `comment KEY-N TEXT` | Comment on a task |
 | `guide` | Compact usage guide for agents |
 | `db` | Database path and schema version |

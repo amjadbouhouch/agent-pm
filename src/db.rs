@@ -296,6 +296,8 @@ pub enum EventKind {
     Attr,
     /// A comment was added; new = its text.
     Commented,
+    /// The task moved to another project; old/new = its KEY-N before and after.
+    Moved,
 }
 
 impl EventKind {
@@ -305,6 +307,7 @@ impl EventKind {
             EventKind::Changed => "changed",
             EventKind::Attr => "attr",
             EventKind::Commented => "commented",
+            EventKind::Moved => "moved",
         }
     }
 }
@@ -327,15 +330,27 @@ pub fn record_event(
     Ok(())
 }
 
-/// Project id for a key, case-insensitive (`apm` finds `APM`).
+/// Project id for a key, case-insensitive (`apm` finds `APM`). A key the project had before a
+/// rename resolves through `project_aliases`. A live key and an alias never share a name:
+/// creating or renaming to a key deletes the alias of that name.
 pub fn project_id(conn: &Connection, key: &str) -> Result<i64> {
+    let key = key.to_uppercase();
     conn.query_row(
-        "SELECT id FROM projects WHERE key = ?1",
-        params![key.to_uppercase()],
+        "SELECT id FROM projects WHERE key = ?1
+         UNION ALL SELECT project_id FROM project_aliases WHERE key = ?1
+         LIMIT 1",
+        params![key],
         |r| r.get(0),
     )
     .optional()?
-    .ok_or_else(|| err(format!("no such project: {}", key.to_uppercase())))
+    .ok_or_else(|| err(format!("no such project: {key}")))
+}
+
+/// Make `key` a live key: drop the alias of that name, if any (a live key always wins).
+/// Call it in the transaction that creates or renames to `key`.
+pub fn claim_project_key(conn: &Connection, key: &str) -> Result<()> {
+    conn.execute("DELETE FROM project_aliases WHERE key = ?1", params![key])?;
+    Ok(())
 }
 
 /// Map a write's UNIQUE-constraint failure to `exists()` (e.g. `project already exists: X`).
@@ -395,19 +410,28 @@ pub fn parse_item_key(s: &str) -> Result<(String, i64)> {
     Ok((key, n))
 }
 
-/// Resolve `KEY-N` to an item.
+/// Resolve `KEY-N` to an item. The key may be an alias, and `N` a number the task had before
+/// it moved (`item_aliases`); either way the result is the task where it is now. Numbers are
+/// never reused, so a live number and an alias never collide.
 pub fn item(conn: &Connection, reference: &str) -> Result<ItemRef> {
     let (key, seq) = parse_item_key(reference)?;
     let project_id = project_id(conn, &key)?;
-    let id = conn
-        .query_row(
-            "SELECT id FROM items WHERE project_id = ?1 AND seq = ?2",
-            params![project_id, seq],
-            |r| r.get(0),
-        )
-        .optional()?
-        .ok_or_else(|| err(format!("no such item: {}", item_key(&key, seq))))?;
-    Ok(ItemRef { id, project_id })
+    conn.query_row(
+        "SELECT id, project_id FROM items WHERE project_id = ?1 AND seq = ?2
+         UNION ALL
+         SELECT i.id, i.project_id FROM item_aliases a JOIN items i ON i.id = a.item_id
+         WHERE a.project_id = ?1 AND a.seq = ?2
+         LIMIT 1",
+        params![project_id, seq],
+        |r| {
+            Ok(ItemRef {
+                id: r.get(0)?,
+                project_id: r.get(1)?,
+            })
+        },
+    )
+    .optional()?
+    .ok_or_else(|| err(format!("no such item: {}", item_key(&key, seq))))
 }
 
 #[cfg(test)]
