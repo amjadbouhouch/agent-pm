@@ -38,9 +38,26 @@ This puts `apm` in `~/.agent-pm/bin` and offers to add it to your `PATH`. Re-run
 upgrade. Options: `--version v0.1.0`, `--dir DIR`, `--no-modify-path`, `--uninstall`
 (keeps your database); `sh install.sh --help` lists them all.
 
-Windows: download `apm-windows-x64.exe` from the
-[latest release](https://github.com/amjadbouhouch/agent-pm/releases/latest), rename it to
-`apm.exe` and put it on your `PATH`.
+Windows (x64; PowerShell 5.1 or 7):
+
+```powershell
+irm https://raw.githubusercontent.com/amjadbouhouch/agent-pm/main/install.ps1 | iex
+```
+
+This puts `apm.exe` in `%USERPROFILE%\.agent-pm\bin` and offers to add it to your user
+`PATH` (no admin). Re-run it to upgrade. `irm | iex` takes no parameters; to pass them,
+run the script as a scriptblock:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/amjadbouhouch/agent-pm/main/install.ps1))) -Version v0.3.0
+```
+
+Parameters: `-Version vX.Y.Z`, `-Dir DIR`, `-NoModifyPath`, `-Uninstall` (removes `apm.exe`
+and its PATH entry, keeps your database), `-Help`. The `irm | iex` form reads the same
+settings from `APM_VERSION`, `APM_INSTALL_DIR` and `APM_MODIFY_PATH` (`yes`/`no`); a
+`$env:APM_VERSION` you set stays set for the rest of the session and pins later upgrades,
+so clear it afterwards (`Remove-Item Env:APM_VERSION`). A downloaded copy runs as
+`powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version v0.3.0`.
 
 Or build it with Rust (also the way on musl/Alpine):
 

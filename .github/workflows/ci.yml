@@ -34,3 +34,12 @@ jobs:
       - name: Verify install.sh is valid POSIX sh
         if: runner.os != 'Windows'
         run: sh -n install.sh
+
+      - name: Verify install.ps1 parses in Windows PowerShell and PowerShell 7
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $check = '[void][ScriptBlock]::Create((Get-Content install.ps1 -Raw))'
+          powershell -NoProfile -Command $check
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Invoke-Expression $check
