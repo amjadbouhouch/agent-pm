@@ -347,10 +347,39 @@ pub fn project_id(conn: &Connection, key: &str) -> Result<i64> {
 }
 
 /// Make `key` a live key: drop the alias of that name, if any (a live key always wins).
-/// Call it in the transaction that creates or renames to `key`.
-pub fn claim_project_key(conn: &Connection, key: &str) -> Result<()> {
-    conn.execute("DELETE FROM project_aliases WHERE key = ?1", params![key])?;
-    Ok(())
+/// Call it in the transaction that creates or re-keys `project_id` (None for a new project) to
+/// `key`. Returns the current key of the other project the alias belonged to: its old ids
+/// under `key` stop resolving, and the caller should say so.
+pub fn claim_project_key(
+    conn: &Connection,
+    key: &str,
+    project_id: Option<i64>,
+) -> Result<Option<String>> {
+    let owner = conn
+        .query_row(
+            "DELETE FROM project_aliases WHERE key = ?1 RETURNING project_id",
+            params![key],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()?
+        .filter(|&owner| Some(owner) != project_id);
+    let Some(owner) = owner else {
+        return Ok(None);
+    };
+    Ok(Some(conn.query_row(
+        "SELECT key FROM projects WHERE id = ?1",
+        params![owner],
+        |r| r.get(0),
+    )?))
+}
+
+/// Take the next task number of a project. Call it inside the write transaction that uses it.
+pub fn next_seq(conn: &Connection, project_id: i64) -> Result<i64> {
+    Ok(conn.query_row(
+        "UPDATE projects SET next_seq = next_seq + 1 WHERE id = ?1 RETURNING next_seq - 1",
+        params![project_id],
+        |r| r.get(0),
+    )?)
 }
 
 /// Map a write's UNIQUE-constraint failure to `exists()` (e.g. `project already exists: X`).

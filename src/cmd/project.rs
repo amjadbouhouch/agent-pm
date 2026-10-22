@@ -99,7 +99,7 @@ fn add(ctx: &Ctx, key: &str, name: &str, description: Option<&str>) -> Result<()
     let key = db::check_project_key(key)?;
     check_name(name)?;
     let tx = db::write_tx(&ctx.conn)?;
-    db::claim_project_key(&tx, &key)?;
+    let claimed = db::claim_project_key(&tx, &key, None)?;
     db::unique(
         tx.execute(
             "INSERT INTO projects (key, name, description) VALUES (?1, ?2, ?3)",
@@ -110,8 +110,7 @@ fn add(ctx: &Ctx, key: &str, name: &str, description: Option<&str>) -> Result<()
     let id = tx.last_insert_rowid();
     status::seed(&tx, id)?;
     tx.commit()?;
-    let project = get(&ctx.conn, id)?;
-    output::written(ctx.json, &project, &format!("created {}", project.key))
+    written(ctx, id, "created", claimed)
 }
 
 fn list(ctx: &Ctx) -> Result<()> {
@@ -179,10 +178,11 @@ fn edit(
     let tx = db::write_tx(&ctx.conn)?;
     let id = db::project_id(&tx, key)?;
     let old_key = get(&tx, id)?.key;
+    let mut claimed = None;
     if let Some(new_key) = new_key.as_deref().filter(|k| *k != old_key) {
         // The new key stops being an alias (of this or another project); the old one becomes
         // one, so APM-3 keeps finding what is now OPS-3.
-        db::claim_project_key(&tx, new_key)?;
+        claimed = db::claim_project_key(&tx, new_key, Some(id))?;
         db::unique(
             tx.execute(
                 "UPDATE projects SET key = ?1 WHERE id = ?2",
@@ -204,8 +204,22 @@ fn edit(
         params![name, description, id],
     )?;
     tx.commit()?;
+    written(ctx, id, "updated", claimed)
+}
+
+/// Print a created or re-keyed project. When its key was another project's alias, say so:
+/// that project's old ids under this key no longer resolve.
+fn written(ctx: &Ctx, id: i64, verb: &str, claimed: Option<String>) -> Result<()> {
     let project = get(&ctx.conn, id)?;
-    output::written(ctx.json, &project, &format!("updated {}", project.key))
+    let mut line = format!("{verb} {}", project.key);
+    let mut value = serde_json::to_value(&project)?;
+    if let Some(from) = claimed {
+        line.push_str(&format!(
+            " (key was an alias of {from}; its old ids no longer resolve)"
+        ));
+        value["claimed_alias_from"] = from.into();
+    }
+    output::written(ctx.json, &value, &line)
 }
 
 fn rm(ctx: &Ctx, key: &str) -> Result<()> {

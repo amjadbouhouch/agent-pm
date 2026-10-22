@@ -293,15 +293,31 @@ fn select_values_need_the_option_in_the_target() {
 }
 
 #[test]
+fn move_text_lists_every_dropped_value() {
+    let env = Env::new();
+    for key in ["APM", "OPS"] {
+        env.json(&["project", "add", key, "x"]);
+    }
+    env.json(&["attr", "add", "size", "-p", "APM", "--type", "text"]);
+    env.json(&["attr", "add", "pts", "-p", "APM", "--type", "number"]);
+    env.json(&["add", "a", "-p", "APM", "--set", "size=m"]);
+    env.json(&["add", "b", "--parent", "APM-1", "--set", "pts=3"]);
+    assert_eq!(
+        text(&env, &["move", "APM-1", "OPS"]),
+        "moved APM-1 -> OPS-1 (1 subtask(s); dropped OPS-1 size=m, OPS-2 pts=3)\n"
+    );
+}
+
+#[test]
 fn move_text_output() {
     let env = seeded();
     assert_eq!(
         text(&env, &["move", "APM-2", "OPS"]),
-        "moved APM-2 → OPS-2 (2 subtask(s))\ndropped OPS-2 size=m\n"
+        "moved APM-2 -> OPS-2 (2 subtask(s); dropped OPS-2 size=m)\n"
     );
     assert_eq!(
         text(&env, &["move", "APM-5", "OPS"]),
-        "moved APM-5 → OPS-5\n"
+        "moved APM-5 -> OPS-5\n"
     );
 }
 

@@ -64,11 +64,7 @@ pub fn run(ctx: &Ctx, args: MoveArgs) -> Result<()> {
              SELECT project_id, seq, id FROM items WHERE id = ?1",
             params![id],
         )?;
-        let seq: i64 = tx.query_row(
-            "UPDATE projects SET next_seq = next_seq + 1 WHERE id = ?1 RETURNING next_seq - 1",
-            params![target],
-            |r| r.get(0),
-        )?;
+        let seq = db::next_seq(&tx, target)?;
         let status_id = match status::find(&tx, target, &before.status)? {
             Some(s) => s,
             None => status::default_id(&tx, target)?,
@@ -102,20 +98,30 @@ pub fn run(ctx: &Ctx, args: MoveArgs) -> Result<()> {
         renumbered: Pairs(renumbered),
         dropped,
     };
-    if ctx.json {
-        return output::json(&moved);
-    }
+    output::written(ctx.json, &moved, &line(&moved))
+}
+
+/// `moved APM-3 -> OPS-7 (2 subtask(s); dropped OPS-7 size=m, OPS-8 pts=3)`.
+fn line(moved: &Moved) -> String {
     let (old, new) = &moved.renumbered.0[0];
+    let mut notes = Vec::new();
     match moved.renumbered.0.len() - 1 {
-        0 => println!("moved {old} → {new}"),
-        n => println!("moved {old} → {new} ({n} subtask(s))"),
+        0 => {}
+        n => notes.push(format!("{n} subtask(s)")),
     }
-    for (id, values) in &moved.dropped {
-        for (name, value) in values {
-            println!("dropped {id} {name}={value}");
-        }
+    let dropped: Vec<String> = moved
+        .dropped
+        .iter()
+        .flat_map(|(id, values)| values.iter().map(move |(k, v)| format!("{id} {k}={v}")))
+        .collect();
+    if !dropped.is_empty() {
+        notes.push(format!("dropped {}", dropped.join(", ")));
     }
-    Ok(())
+    if notes.is_empty() {
+        format!("moved {old} -> {new}")
+    } else {
+        format!("moved {old} -> {new} ({})", notes.join("; "))
+    }
 }
 
 /// A task and all its subtasks: the task first, then level by level, by number.

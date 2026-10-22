@@ -182,11 +182,7 @@ pub fn add(ctx: &Ctx, args: AddArgs) -> Result<()> {
         Some(name) => status::resolve(&tx, project_id, name)?,
         None => status::default_id(&tx, project_id)?,
     };
-    let seq: i64 = tx.query_row(
-        "UPDATE projects SET next_seq = next_seq + 1 WHERE id = ?1 RETURNING next_seq - 1",
-        params![project_id],
-        |r| r.get(0),
-    )?;
+    let seq = db::next_seq(&tx, project_id)?;
     tx.execute(
         "INSERT INTO items (project_id, seq, parent_id, milestone_id, title, body, status_id,
                             priority, assignee, due, created_by)
