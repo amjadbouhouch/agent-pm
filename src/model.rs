@@ -63,6 +63,26 @@ pub fn parse_pair(s: &str) -> std::result::Result<(String, String), String> {
     }
 }
 
+/// clap value parser for a claim's time to live, `<n>m`, `<n>h` or `<n>d` (1m to 7d), in seconds.
+pub fn parse_ttl(s: &str) -> std::result::Result<i64, String> {
+    let bad = || format!("invalid ttl `{s}`: expected <n>m, <n>h or <n>d, from 1m to 7d");
+    let unit = match s.chars().last() {
+        Some('m') => 60,
+        Some('h') => 3600,
+        Some('d') => 86400,
+        _ => return Err(bad()),
+    };
+    let n = &s[..s.len() - 1];
+    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(bad());
+    }
+    let secs = n.parse::<i64>().map_err(|_| bad())?.saturating_mul(unit);
+    if !(60..=7 * 86400).contains(&secs) {
+        return Err(bad());
+    }
+    Ok(secs)
+}
+
 /// Validate a `YYYY-MM-DD` date (calendar-checked, no time zone).
 pub fn check_date(s: &str) -> Result<()> {
     let bad = || err(format!("invalid date `{s}`, expected YYYY-MM-DD"));
@@ -287,5 +307,28 @@ mod tests {
         );
         assert!(parse_pair("=x").is_err());
         assert!(parse_pair("novalue").is_err());
+    }
+
+    #[test]
+    fn ttls() {
+        assert_eq!(parse_ttl("1m"), Ok(60));
+        assert_eq!(parse_ttl("2h"), Ok(7200));
+        assert_eq!(parse_ttl("7d"), Ok(7 * 86400));
+        assert_eq!(parse_ttl("168h"), Ok(7 * 86400));
+        for s in [
+            "0m",
+            "8d",
+            "169h",
+            "",
+            "m",
+            "2",
+            "1.5h",
+            "-1h",
+            "+1h",
+            "2H",
+            "99999999999999999d",
+        ] {
+            assert!(parse_ttl(s).is_err(), "{s}");
+        }
     }
 }

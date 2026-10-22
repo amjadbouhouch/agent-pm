@@ -10,7 +10,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use super::status::{self, Shortcut};
-use super::{Ctx, attr, comment, link, milestone, tag};
+use super::{Ctx, attr, claim, comment, link, milestone, tag};
 use crate::db::{self, EventKind};
 use crate::error::{Result, err};
 use crate::model::{Category, Priority, When, normalize_when, parse_pair, parse_when};
@@ -97,6 +97,12 @@ pub struct ListArgs {
     /// Only open tasks with an open blocker or in a status named blocked
     #[arg(long)]
     pub blocked: bool,
+    /// Only tasks with a live claim
+    #[arg(long, conflicts_with = "unclaimed")]
+    pub claimed: bool,
+    /// Only tasks without a live claim
+    #[arg(long)]
+    pub unclaimed: bool,
     #[command(flatten)]
     pub query: ListQuery,
 }
@@ -194,6 +200,8 @@ pub struct Item {
     pub attributes: Map<String, Value>,
     /// Sorted.
     pub tags: Vec<String>,
+    /// The live claim, if any (an expired one is not shown).
+    pub claim: Option<claim::Claim>,
 }
 
 /// `show`: the item plus its links, subtasks and comments.
@@ -216,15 +224,21 @@ struct Node {
     subtasks: Option<Vec<Node>>,
 }
 
-const SELECT: &str = "
-    SELECT i.id, p.key || '-' || i.seq, p.key, i.title, i.body, s.name, s.category, i.priority,
-           i.assignee, i.due, m.name, p.key || '-' || par.seq,
-           i.created_by, i.created_at, i.updated_at
-    FROM items i
-    JOIN projects p ON p.id = i.project_id
-    JOIN statuses s ON s.id = i.status_id
-    LEFT JOIN milestones m ON m.id = i.milestone_id
-    LEFT JOIN items par ON par.id = i.parent_id";
+/// The item query up to WHERE. The claim's holder is selected only while the claim is live.
+fn select() -> String {
+    format!(
+        "SELECT i.id, p.key || '-' || i.seq, p.key, i.title, i.body, s.name, s.category,
+                i.priority, i.assignee, i.due, m.name, p.key || '-' || par.seq,
+                i.created_by, i.created_at, i.updated_at,
+                CASE WHEN {} THEN i.claimed_by END, i.claimed_at, i.claim_expires
+         FROM items i
+         JOIN projects p ON p.id = i.project_id
+         JOIN statuses s ON s.id = i.status_id
+         LEFT JOIN milestones m ON m.id = i.milestone_id
+         LEFT JOIN items par ON par.id = i.parent_id",
+        claim::live()
+    )
+}
 
 pub fn add(ctx: &Ctx, mut args: AddArgs) -> Result<()> {
     check_title(&args.title)?;
@@ -342,26 +356,13 @@ pub fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
         conds.push(format!("i.assignee = {}", bind(&mut vals, who.clone())));
     }
     if let Some(name) = &args.milestone {
-        // With a known project the name must exist there; otherwise match it in any project.
-        match known_project {
-            Some(pid) => {
-                let id = milestone::resolve(conn, pid, name)?;
-                conds.push(format!("i.milestone_id = {}", bind(&mut vals, id)));
-            }
-            None => {
-                let known: bool = conn.query_row(
-                    "SELECT count(*) > 0 FROM milestones WHERE name = ?1",
-                    params![name],
-                    |r| r.get(0),
-                )?;
-                if !known {
-                    return Err(err(format!("no such milestone: {name}")));
-                }
-                conds.push(format!("m.name = {}", bind(&mut vals, name.clone())));
-            }
-        }
+        conds.push(milestone_cond(conn, known_project, name, &mut vals)?);
     }
     list_links_and_tags(&args, &mut conds, &mut vals)?;
+    if args.claimed || args.unclaimed {
+        let not = if args.unclaimed { "NOT " } else { "" };
+        conds.push(format!("{not}{}", claim::live()));
+    }
     search_and_due_filters(&args.query, &mut conds, &mut vals)?;
     let order = sort_order(&args.query.sort)?;
     let keep = attr::filter(conn, project_id, &args.filter)?;
@@ -404,6 +405,29 @@ pub fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
         &rows,
     );
     Ok(())
+}
+
+/// The condition for a milestone name: with a known project the name must exist there;
+/// otherwise it matches in any project. Used by `list` and `next`.
+pub fn milestone_cond(
+    conn: &Connection,
+    known_project: Option<i64>,
+    name: &str,
+    vals: &mut Vec<SqlValue>,
+) -> Result<String> {
+    if let Some(pid) = known_project {
+        let id = milestone::resolve(conn, pid, name)?;
+        return Ok(format!("i.milestone_id = {}", bind(vals, id)));
+    }
+    let known: bool = conn.query_row(
+        "SELECT count(*) > 0 FROM milestones WHERE name = ?1",
+        params![name],
+        |r| r.get(0),
+    )?;
+    if !known {
+        return Err(err(format!("no such milestone: {name}")));
+    }
+    Ok(format!("m.name = {}", bind(vals, name.to_string())))
 }
 
 pub fn show(ctx: &Ctx, args: ShowArgs) -> Result<()> {
@@ -452,6 +476,9 @@ pub fn show(ctx: &Ctx, args: ShowArgs) -> Result<()> {
             println!("{name}: {v}");
         }
     }
+    if let Some(c) = &i.claim {
+        println!("claimed: {} until {}", c.by, c.expires);
+    }
     println!("created: {} by {}", i.created_at, i.created_by);
     println!("updated: {}", i.updated_at);
     for (name, value) in &i.attributes {
@@ -464,7 +491,9 @@ pub fn show(ctx: &Ctx, args: ShowArgs) -> Result<()> {
         println!("tags: {}", i.tags.join(", "));
     }
     if !i.body.is_empty() {
-        println!("\n{}", i.body);
+        // Indented, so no body line reads like a field line.
+        println!();
+        print_text("  ", i.body.lines());
     }
     for (label, linked) in detail.links.groups() {
         if !linked.is_empty() {
@@ -488,7 +517,11 @@ pub fn show(ctx: &Ctx, args: ShowArgs) -> Result<()> {
     if !detail.comments.is_empty() {
         println!("\ncomments:");
         for c in &detail.comments {
-            println!("  {} {}: {}", c.created_at, c.author, c.body);
+            // Continuation lines of a multi-line comment are indented under it.
+            let mut lines = c.body.lines();
+            let first = lines.next().unwrap_or_default();
+            println!("  {} {}: {first}", c.created_at, c.author);
+            print_text("    ", lines);
         }
     }
     Ok(())
@@ -597,6 +630,7 @@ pub fn edit(ctx: &Ctx, mut args: EditArgs) -> Result<()> {
     }
     attr::set_values(&tx, item.project_id, item.id, &args.set)?;
     record_changes(&tx, &ctx.actor, &before, &snapshot(&tx, item.id)?)?;
+    claim::release_if_closed(&tx, &ctx.actor, item.id)?;
     tag::apply(&tx, &ctx.actor, item.id, &args.tags, &args.untags)?;
     let verb = touch_if_changed(&tx, &before)?;
     tx.commit()?;
@@ -614,6 +648,7 @@ pub fn set_status(ctx: &Ctx, args: KeyArg, shortcut: Shortcut) -> Result<()> {
         params![status_id, item.id],
     )?;
     record_changes(&tx, &ctx.actor, &before, &snapshot(&tx, item.id)?)?;
+    claim::release_if_closed(&tx, &ctx.actor, item.id)?;
     let verb = touch_if_changed(&tx, &before)?;
     tx.commit()?;
     let item = get(&ctx.conn, item.id)?;
@@ -648,6 +683,17 @@ pub fn rm(ctx: &Ctx, args: KeyArg) -> Result<()> {
 /// A task as one line of `show`: id, status, title.
 fn line_row(id: &str, status: &str, title: &str) -> Vec<String> {
     vec![id.to_string(), status.to_string(), title.to_string()]
+}
+
+/// Lines of user text, each indented (blank lines stay empty).
+fn print_text<'a>(indent: &str, lines: impl Iterator<Item = &'a str>) {
+    for line in lines {
+        if line.trim().is_empty() {
+            println!();
+        } else {
+            println!("{indent}{line}");
+        }
+    }
 }
 
 /// Rows printed as aligned columns, indented by two spaces.
@@ -692,13 +738,13 @@ pub fn query(conn: &Connection, cond: &str, vals: &[SqlValue]) -> Result<Vec<Ite
 }
 
 /// `query` with an ORDER BY clause (see `sort_order`).
-fn query_sorted(
+pub fn query_sorted(
     conn: &Connection,
     cond: &str,
     vals: &[SqlValue],
     order: &str,
 ) -> Result<Vec<Item>> {
-    let sql = format!("{SELECT} WHERE {cond} ORDER BY {order}");
+    let sql = format!("{} WHERE {cond} ORDER BY {order}", select());
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_from_iter(vals.iter()), |r| {
         Ok(Item {
@@ -719,6 +765,14 @@ fn query_sorted(
             updated_at: r.get(14)?,
             attributes: Map::new(),
             tags: Vec::new(),
+            claim: match r.get::<_, Option<String>>(15)? {
+                Some(by) => Some(claim::Claim {
+                    by,
+                    at: r.get(16)?,
+                    expires: r.get(17)?,
+                }),
+                None => None,
+            },
         })
     })?;
     let mut items = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -879,7 +933,7 @@ fn canonical(reference: &str) -> String {
 }
 
 /// Add a parameter and return its `?N` placeholder.
-fn bind(vals: &mut Vec<SqlValue>, v: impl Into<SqlValue>) -> String {
+pub fn bind(vals: &mut Vec<SqlValue>, v: impl Into<SqlValue>) -> String {
     vals.push(v.into());
     format!("?{}", vals.len())
 }
@@ -934,7 +988,7 @@ fn search_and_due_filters(
 }
 
 /// Placeholders for the closed categories (done, cancelled), comma-separated.
-fn closed_marks(vals: &mut Vec<SqlValue>) -> String {
+pub fn closed_marks(vals: &mut Vec<SqlValue>) -> String {
     let marks: Vec<String> = Category::value_variants()
         .iter()
         .filter(|c| c.is_closed())
@@ -955,7 +1009,7 @@ pub fn flag_after_sort(args: &[String]) -> Option<&str> {
 }
 
 /// `CASE` expression ranking `i.priority`: none 0 .. urgent 4, in `Priority` order.
-fn priority_rank() -> String {
+pub fn priority_rank() -> String {
     let whens: Vec<String> = Priority::value_variants()
         .iter()
         .enumerate()

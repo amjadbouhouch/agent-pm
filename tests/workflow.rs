@@ -114,6 +114,10 @@ fn every_guide_example_runs_in_order() {
         "MOVE AND RENAME (old task ids and project keys keep resolving)",
     );
     let search = guide_examples(&guide, "SEARCH, SORT, DUE");
+    let agents = guide_examples(
+        &guide,
+        "AGENT LOOP (agents sharing a project each get their own task)",
+    );
     for args in workflow
         .iter()
         .chain(&attrs)
@@ -121,6 +125,7 @@ fn every_guide_example_runs_in_order() {
         .chain(&links)
         .chain(&moves)
         .chain(&search)
+        .chain(&agents)
     {
         let out = env.apm().arg("--json").args(args).output().unwrap();
         assert!(
@@ -691,6 +696,11 @@ fn text_output_is_ascii() {
         &["attr", "list", "-p", "APM"],
         &["project", "list"],
         &["project", "show", "APM"],
+        &["claim", "APM-2", "--ttl", "1h"],
+        &["show", "APM-2"],
+        &["claims"],
+        &["list", "--claimed"],
+        &["release", "APM-2"],
         &["rm", "APM-2"],
         &["db"],
         &["guide"],
@@ -703,6 +713,8 @@ fn text_output_is_ascii() {
         &["list", "--sort", "nope"],
         &["list", "--limit", "0"],
         &["move", "INFRA-1", "OPS"],
+        &["claim", "APM-3"],
+        &["next", "-p", "APM"],
     ];
     let mut out = String::new();
     for (args, ok) in story

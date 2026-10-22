@@ -1,6 +1,7 @@
 //! One module per command group. Each owns its clap args and its `run`.
 
 pub mod attr;
+pub mod claim;
 pub mod comment;
 pub mod db;
 pub mod guide;
@@ -27,9 +28,10 @@ pub struct Ctx {
     pub actor: String,
 }
 
-pub fn run(cli: Cli) -> Result<()> {
+/// Run a command; returns the exit code for a success (0, or 3 from `next`).
+pub fn run(cli: Cli) -> Result<i32> {
     if let Command::Guide = cli.command {
-        return guide::run(cli.json);
+        return guide::run(cli.json).map(|()| 0);
     }
     let path = crate::db::path(cli.db.as_deref())?;
     let ctx = Ctx {
@@ -37,7 +39,7 @@ pub fn run(cli: Cli) -> Result<()> {
         json: cli.json,
         actor: cli::actor(cli.actor.as_deref()),
     };
-    match cli.command {
+    let done = match cli.command {
         Command::Project(c) => project::run(&ctx, c),
         Command::Add(a) => item::add(&ctx, a),
         Command::List(a) => item::list(&ctx, a),
@@ -48,6 +50,10 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Block(a) => item::set_status(&ctx, a, Shortcut::Block),
         Command::Rm(a) => item::rm(&ctx, a),
         Command::Move(a) => mv::run(&ctx, a),
+        Command::Claim(a) => claim::claim(&ctx, a),
+        Command::Release(a) => claim::release(&ctx, a),
+        Command::Next(a) => return claim::next(&ctx, a),
+        Command::Claims(a) => claim::claims(&ctx, a),
         Command::Milestone(c) => milestone::run(&ctx, c),
         Command::Status(c) => status::run(&ctx, c),
         Command::Attr(c) => attr::run(&ctx, c),
@@ -61,5 +67,6 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Backup(a) => port::backup(&ctx, &path, a),
         Command::Db => db::run(&ctx, &path),
         Command::Guide => unreachable!("handled before opening the database"),
-    }
+    };
+    done.map(|()| 0)
 }

@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser, Subcommand};
 
-use crate::cmd::{attr, comment, history, item, link, milestone, mv, port, project, status, tag};
+use crate::cmd::{
+    attr, claim, comment, history, item, link, milestone, mv, port, project, status, tag,
+};
 
 /// agent-pm: a small project tracker for agents and humans.
 #[derive(Parser, Debug)]
@@ -63,6 +65,14 @@ pub enum Command {
     Rm(item::KeyArg),
     /// Move a task and its subtasks to another project (old ids keep working)
     Move(mv::MoveArgs),
+    /// Claim a task (or renew your claim) for a while: "I am working on this"
+    Claim(claim::ClaimArgs),
+    /// Drop your claim on a task
+    Release(claim::ReleaseArgs),
+    /// Claim, assign and start the best ready task (exit code 3 if none)
+    Next(claim::NextArgs),
+    /// List live claims
+    Claims(claim::ClaimsArgs),
     /// Manage milestones
     #[command(subcommand)]
     Milestone(milestone::MilestoneCmd),

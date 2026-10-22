@@ -319,7 +319,7 @@ fn show_includes_subtasks_and_comments() {
     assert!(out.starts_with("APM-1  parent\n"));
     assert!(out.contains("status: todo\n"));
     assert!(out.contains("created: "));
-    assert!(out.contains("\nthe body\n"));
+    assert!(out.contains("\n  the body\n"));
     assert!(out.contains("  APM-2  done  child\n"));
     assert!(out.contains("alice: looks good\n"));
 }
@@ -853,4 +853,33 @@ fn help_shows_the_stdin_forms() {
     let help = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     assert!(help.contains("[TEXT|-]"), "{help}");
     assert!(help.contains("--file <PATH>"), "{help}");
+}
+
+/// APM-19: multi-line bodies and comments stay indented in `show`.
+#[test]
+fn show_indents_multi_line_bodies_and_comments() {
+    let env = env_apm();
+    env.json(&[
+        "add",
+        "x",
+        "-p",
+        "APM",
+        "-b",
+        "first\nstatus: not a field\n\nlast",
+    ]);
+    env.json_stdin(&["comment", "APM-1", "-"], "## heading\n- item\n");
+    let text = text(&env, &["show", "APM-1"]);
+    let body = "\n  first\n  status: not a field\n\n  last\n";
+    assert!(text.contains(body), "{text}");
+    let comments: Vec<&str> = text
+        .lines()
+        .skip_while(|l| *l != "comments:")
+        .skip(1)
+        .collect();
+    assert_eq!(comments.len(), 2, "{text}");
+    assert!(
+        comments[0].starts_with("  ") && comments[0].ends_with(" tester: ## heading"),
+        "{text}"
+    );
+    assert_eq!(comments[1], "    - item");
 }

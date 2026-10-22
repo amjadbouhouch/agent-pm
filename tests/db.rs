@@ -12,10 +12,10 @@ fn version_prints() {
 fn db_is_created_and_migrated() {
     let env = Env::new();
     let v = env.json(&["db"]);
-    assert_eq!(v["schema_version"], 2);
+    assert_eq!(v["schema_version"], 3);
     assert!(env.db_path().exists());
     // Reopening an up-to-date database is a no-op.
-    assert_eq!(env.json(&["db"])["schema_version"], 2);
+    assert_eq!(env.json(&["db"])["schema_version"], 3);
 }
 
 #[test]
@@ -71,7 +71,7 @@ fn concurrent_first_opens_of_a_new_database() {
     for w in workers {
         w.join().unwrap();
     }
-    assert_eq!(env.json(&["db"])["schema_version"], 2);
+    assert_eq!(env.json(&["db"])["schema_version"], 3);
     let mode: String = env
         .conn()
         .query_row("PRAGMA journal_mode", [], |r| r.get(0))

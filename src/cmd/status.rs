@@ -5,7 +5,7 @@ use clap::Subcommand;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
-use super::{Ctx, project};
+use super::{Ctx, claim, project};
 use crate::db::{self, EventKind, write_tx};
 use crate::error::{AppError, Result, err};
 use crate::model::Category;
@@ -169,16 +169,21 @@ pub fn for_shortcut(conn: &Connection, project_id: i64, shortcut: Shortcut) -> R
     }
 }
 
+/// The first status of a category by position, if the project has one. Used by `next`.
+pub fn first_in(conn: &Connection, project_id: i64, category: Category) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM statuses WHERE project_id = ?1 AND category = ?2
+             ORDER BY position, id LIMIT 1",
+            params![project_id, category.as_str()],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
 /// The first status of a category by position.
 fn first(conn: &Connection, project_id: i64, category: Category) -> Result<i64> {
-    conn.query_row(
-        "SELECT id FROM statuses WHERE project_id = ?1 AND category = ?2
-         ORDER BY position, id LIMIT 1",
-        params![project_id, category.as_str()],
-        |r| r.get(0),
-    )
-    .optional()?
-    .ok_or_else(|| {
+    first_in(conn, project_id, category)?.ok_or_else(|| {
         err(format!(
             "project {} has no {}-category status",
             project_key(conn, project_id),
@@ -333,6 +338,19 @@ fn edit(
         || already_exists(rename.unwrap_or(name)),
     )?;
     place(&tx, project_id, id, position)?;
+    if category.is_some_and(Category::is_closed) {
+        // Its tasks are closed now: they keep no claims.
+        let mut stmt = tx.prepare("SELECT id FROM items WHERE status_id = ?1")?;
+        let ids = stmt
+            .query_map(params![id], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<i64>>>()?;
+        drop(stmt);
+        for item_id in ids {
+            if claim::release_if_closed(&tx, &ctx.actor, item_id)? {
+                claim::touch(&tx, item_id)?;
+            }
+        }
+    }
     tx.commit()?;
     let s = load(&ctx.conn, id)?;
     output::written(ctx.json, &s, &format!("updated status {}", s.name))
@@ -403,6 +421,7 @@ fn move_tasks(tx: &Connection, actor: &str, from: &Status, to: &Status) -> Resul
             Some(&from.name),
             Some(&to.name),
         )?;
+        claim::release_if_closed(tx, actor, item_id)?;
     }
     Ok(())
 }
