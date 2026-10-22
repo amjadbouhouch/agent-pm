@@ -14,11 +14,21 @@ prints stable JSON, so agents can parse it; without it, output is short plain te
 
 ## Install
 
-Download the binary for your platform from the
-[latest release](https://github.com/amjadbouhouch/agent-pm/releases/latest)
-(`apm-<target>`, `.exe` on Windows), rename it to `apm` and put it on your `PATH`.
+macOS and Linux (x64, arm64):
 
-Or build it with Rust:
+```sh
+curl -fsSL https://raw.githubusercontent.com/amjadbouhouch/agent-pm/main/install.sh | sh
+```
+
+This puts `apm` in `~/.agent-pm/bin` and offers to add it to your `PATH`. Re-run it to
+upgrade. Options: `--version v0.1.0`, `--dir DIR`, `--no-modify-path`, `--uninstall`
+(keeps your database); `sh install.sh --help` lists them all.
+
+Windows: download `apm-windows-x64.exe` from the
+[latest release](https://github.com/amjadbouhouch/agent-pm/releases/latest), rename it to
+`apm.exe` and put it on your `PATH`.
+
+Or build it with Rust (also the way on musl/Alpine):
 
 ```sh
 cargo install --git https://github.com/amjadbouhouch/agent-pm
