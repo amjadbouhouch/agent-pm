@@ -85,8 +85,8 @@ without changing the tool itself.
 
 Due dates (tasks and milestones) and `datetime` attributes take a date (`2026-11-20`) or a
 date-time with a zone (`2026-11-20T17:00+01:00`, `...Z`), stored in UTC. Date-times without a
-zone are rejected. In `list --due-before/--due-after`, a date bound compares the date part
-of a due; `--overdue` is open tasks due before now (date dues: before today, UTC).
+zone are rejected. In `list --due-before/--due-after`, a date bound compares the UTC date
+part of a due; `--overdue` is open tasks due before now (date dues: before today, UTC).
 
 ## License
 

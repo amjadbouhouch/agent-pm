@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::error::ErrorKind;
+use clap::{CommandFactory, Parser, Subcommand};
 
 use crate::cmd::{attr, comment, item, milestone, project, status};
 
@@ -22,6 +23,21 @@ pub struct Cli {
 
     #[command(subcommand)]
     pub command: Command,
+}
+
+impl Cli {
+    /// Parse the process arguments, rejecting a flag right after `list --sort` (see
+    /// `item::flag_after_sort`) as clap would reject a missing value.
+    pub fn parse_args() -> Result<Cli, clap::Error> {
+        let args: Vec<String> = std::env::args_os()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        if let Some(flag) = item::flag_after_sort(&args) {
+            let msg = format!("--sort needs a value before {flag}");
+            return Err(Cli::command().error(ErrorKind::InvalidValue, msg));
+        }
+        Cli::try_parse_from(std::env::args_os())
+    }
 }
 
 #[derive(Subcommand, Debug)]

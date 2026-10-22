@@ -72,26 +72,28 @@ pub struct ListArgs {
     #[arg(long)]
     pub all: bool,
     #[command(flatten)]
-    pub power: ListPower,
+    pub query: ListQuery,
 }
 
-/// `list` search, due filters, sort and limit (applied by `power_filters` and `sort_order`).
+/// `list` search, due filters, sort and limit (applied by `search_and_due_filters` and
+/// `sort_order`).
 #[derive(Args, Debug)]
-pub struct ListPower {
+pub struct ListQuery {
     /// Case-insensitive substring of the title, body or a comment
     #[arg(long, value_name = "TEXT")]
     pub search: Option<String>,
-    /// Due strictly before WHEN (a date compares with the date part of date-time dues)
+    /// Due strictly before WHEN (a date compares with the UTC date part of date-time dues)
     #[arg(long, value_name = "WHEN")]
     pub due_before: Option<String>,
-    /// Due strictly after WHEN (a date compares with the date part of date-time dues)
+    /// Due strictly after WHEN (a date compares with the UTC date part of date-time dues)
     #[arg(long, value_name = "WHEN")]
     pub due_after: Option<String>,
     /// Open tasks due before now (date dues: before today, UTC)
     #[arg(long)]
     pub overdue: bool,
     /// Sort keys, comma-separated, `-` prefix = descending:
-    /// id created updated due priority status title (default: id)
+    /// id created updated due priority status title (default: id).
+    /// status sorts by project, then the status's position
     #[arg(
         long,
         value_name = "KEYS",
@@ -287,12 +289,7 @@ pub fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
         };
         conds.push(format!("{column} IN ({})", marks.join(", ")));
     } else if !args.all {
-        let marks: Vec<String> = Category::value_variants()
-            .iter()
-            .filter(|c| c.is_closed())
-            .map(|c| bind(&mut vals, c.as_str().to_string()))
-            .collect();
-        conds.push(format!("s.category NOT IN ({})", marks.join(", ")));
+        conds.push(format!("s.category NOT IN ({})", closed_marks(&mut vals)));
     }
     if let Some(who) = &args.assignee {
         conds.push(format!("i.assignee = {}", bind(&mut vals, who.clone())));
@@ -317,8 +314,8 @@ pub fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
             }
         }
     }
-    power_filters(&args.power, &mut conds, &mut vals)?;
-    let order = sort_order(&args.power.sort)?;
+    search_and_due_filters(&args.query, &mut conds, &mut vals)?;
+    let order = sort_order(&args.query.sort)?;
     let keep = attr::filter(conn, project_id, &args.filter)?;
     let cond = if conds.is_empty() {
         "1".to_string()
@@ -329,7 +326,7 @@ pub fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
     if let Some(keep) = keep {
         items.retain(|i| keep.contains(&i.row_id));
     }
-    if let Some(n) = args.power.limit {
+    if let Some(n) = args.query.limit {
         items.truncate(usize::try_from(n).unwrap_or(usize::MAX));
     }
     if ctx.json {
@@ -721,10 +718,15 @@ const SORT_KEYS: &[&str] = &[
 ];
 
 /// Add the `--search`, `--due-before`, `--due-after` and `--overdue` conditions.
-fn power_filters(p: &ListPower, conds: &mut Vec<String>, vals: &mut Vec<SqlValue>) -> Result<()> {
+fn search_and_due_filters(
+    p: &ListQuery,
+    conds: &mut Vec<String>,
+    vals: &mut Vec<SqlValue>,
+) -> Result<()> {
     if let Some(text) = &p.search {
-        let mark = bind(vals, format!("%{}%", escape_like(text)));
-        let like = |col: &str| format!("{col} LIKE {mark} ESCAPE '\\'");
+        // `fold` (db.rs) lowercases all of Unicode; LIKE alone folds ASCII only.
+        let mark = bind(vals, format!("%{}%", escape_like(&text.to_lowercase())));
+        let like = |col: &str| format!("fold({col}) LIKE {mark} ESCAPE '\\'");
         conds.push(format!(
             "({} OR {} OR EXISTS (SELECT 1 FROM comments c WHERE c.item_id = i.id AND {}))",
             like("i.title"),
@@ -743,19 +745,45 @@ fn power_filters(p: &ListPower, conds: &mut Vec<String>, vals: &mut Vec<SqlValue
         conds.push(cond);
     }
     if p.overdue {
-        let marks: Vec<String> = Category::value_variants()
-            .iter()
-            .filter(|c| c.is_closed())
-            .map(|c| bind(vals, c.as_str().to_string()))
-            .collect();
         conds.push(format!(
             "s.category NOT IN ({}) AND i.due < CASE WHEN length(i.due) = 10 \
              THEN date('now') ELSE {} END",
-            marks.join(", "),
+            closed_marks(vals),
             db::NOW_SQL
         ));
     }
     Ok(())
+}
+
+/// Placeholders for the closed categories (done, cancelled), comma-separated.
+fn closed_marks(vals: &mut Vec<SqlValue>) -> String {
+    let marks: Vec<String> = Category::value_variants()
+        .iter()
+        .filter(|c| c.is_closed())
+        .map(|c| bind(vals, c.as_str().to_string()))
+        .collect();
+    marks.join(", ")
+}
+
+/// `--sort` takes hyphen values (`-due`), so clap would swallow a flag right after it as its
+/// value (`--sort --limit 2`). Returns that flag, for `cli::Cli::parse_args` to reject.
+pub fn flag_after_sort(args: &[String]) -> Option<&str> {
+    args.iter()
+        .take_while(|a| *a != "--")
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find(|w| w[0] == "--sort" && w[1].starts_with("--"))
+        .map(|w| w[1].as_str())
+}
+
+/// `CASE` expression ranking `i.priority`: none 0 .. urgent 4, in `Priority` order.
+fn priority_rank() -> String {
+    let whens: Vec<String> = Priority::value_variants()
+        .iter()
+        .enumerate()
+        .map(|(rank, p)| format!("WHEN '{}' THEN {rank}", p.as_str()))
+        .collect();
+    format!("CASE i.priority {} END", whens.join(" "))
 }
 
 /// `%`, `_` and `\` matched literally by `LIKE ... ESCAPE '\'`.
@@ -785,12 +813,9 @@ fn sort_order(keys: &[String]) -> Result<String> {
             "updated" => format!("i.updated_at{dir}"),
             // Tasks without a due date come last in both directions.
             "due" => format!("i.due IS NULL, i.due{dir}"),
-            "priority" => format!(
-                "CASE i.priority WHEN 'urgent' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 \
-                 WHEN 'low' THEN 1 ELSE 0 END{dir}"
-            ),
-            // Positions are per project; equal positions fall through to the id order.
-            "status" => format!("s.position{dir}"),
+            "priority" => format!("{}{dir}", priority_rank()),
+            // Positions are per project, so group by project first.
+            "status" => format!("p.key, s.position{dir}"),
             "title" => format!("i.title COLLATE NOCASE{dir}"),
             _ => {
                 return Err(err(format!(
@@ -829,5 +854,29 @@ mod tests {
         );
         assert!(keys(&["-"]).is_err());
         assert!(keys(&[""]).is_err());
+        assert_eq!(
+            keys(&["priority"]).unwrap(),
+            "CASE i.priority WHEN 'none' THEN 0 WHEN 'low' THEN 1 WHEN 'medium' THEN 2 \
+             WHEN 'high' THEN 3 WHEN 'urgent' THEN 4 END, p.key, i.seq"
+        );
+    }
+
+    #[test]
+    fn flags_after_sort() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let found = |a: &[&str]| flag_after_sort(&args(a)).map(str::to_string);
+        assert_eq!(
+            found(&["apm", "list", "--sort", "--limit", "2"]).as_deref(),
+            Some("--limit")
+        );
+        assert_eq!(
+            found(&["apm", "list", "--sort", "-due", "--limit", "2"]),
+            None
+        );
+        assert_eq!(found(&["apm", "list", "--sort=--all"]), None);
+        assert_eq!(
+            found(&["apm", "add", "-p", "A", "--", "--sort", "--x"]),
+            None
+        );
     }
 }

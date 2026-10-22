@@ -227,6 +227,25 @@ fn search_matches_title_body_and_comments_case_insensitively() {
 }
 
 #[test]
+fn search_folds_unicode_case() {
+    let env = env_apm();
+    add(&env, "École du soir", &[]); // APM-1
+    add(&env, "ecole", &[]); // APM-2: no accent, no match
+    add(&env, "other", &["-b", "voir l'ÉCOLE"]); // APM-3
+    add(&env, "third", &[]); // APM-4
+    env.json(&["comment", "APM-4", "après l'école"]);
+    assert_eq!(
+        list(&env, &["--search", "école"]),
+        ["APM-1", "APM-3", "APM-4"]
+    );
+    assert_eq!(
+        list(&env, &["--search", "ÉCOLE"]),
+        ["APM-1", "APM-3", "APM-4"]
+    );
+    assert_eq!(list(&env, &["--search", "APRÈS"]), ["APM-4"]);
+}
+
+#[test]
 fn search_escapes_like_wildcards() {
     let env = env_apm();
     add(&env, "100% done", &[]);
@@ -286,14 +305,14 @@ fn sort_by_each_key() {
         list(&env, &["--sort", "-due"]),
         ["APM-1", "APM-3", "APM-4", "APM-2", "B-1"]
     );
-    // Status position (todo 1, doing 2, blocked 3), then id.
+    // Project, then status position (todo 1, doing 2, blocked 3), then id.
     assert_eq!(
         list(&env, &["--sort", "status"]),
         ["APM-1", "APM-2", "APM-4", "APM-3", "B-1"]
     );
     assert_eq!(
         list(&env, &["--sort", "-status"]),
-        ["B-1", "APM-3", "APM-1", "APM-2", "APM-4"]
+        ["APM-3", "APM-1", "APM-2", "APM-4", "B-1"]
     );
     // Several keys: the first decides, the next breaks ties, id last.
     assert_eq!(
@@ -302,7 +321,7 @@ fn sort_by_each_key() {
     );
     assert_eq!(
         list(&env, &["--sort", "-status", "--sort", "title"]),
-        ["B-1", "APM-3", "APM-2", "APM-1", "APM-4"]
+        ["APM-3", "APM-2", "APM-1", "APM-4", "B-1"]
     );
     // Keys are case-insensitive.
     assert_eq!(
@@ -367,6 +386,54 @@ fn sort_errors() {
     assert!(
         env.json_err(&["list", "--sort", ""])
             .starts_with("unknown sort key")
+    );
+    // `--sort` right before another flag: a usage error, not `--limit` taken as a key.
+    let out = env
+        .apm()
+        .args(["--json", "list", "--sort", "--limit", "2"])
+        .assert()
+        .code(2);
+    let err: Value = serde_json::from_slice(&out.get_output().stderr).unwrap();
+    assert!(
+        err["error"]
+            .as_str()
+            .unwrap()
+            .contains("--sort needs a value before --limit"),
+        "{err}"
+    );
+    assert_eq!(
+        list(&env, &["--sort", "-due", "--limit", "2"]),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn sort_by_status_groups_by_project() {
+    let env = env_apm();
+    env.json(&["project", "add", "B", "b"]);
+    env.json(&[
+        "status",
+        "add",
+        "triage",
+        "-p",
+        "B",
+        "--category",
+        "todo",
+        "--position",
+        "1",
+    ]);
+    add(&env, "a", &[]); // APM-1 todo (position 1)
+    env.json(&["add", "b", "-p", "B"]); // B-1 triage (position 1)
+    env.json(&["add", "c", "-p", "B", "--status", "todo"]); // B-2 todo (position 2 in B)
+    add(&env, "d", &[]); // APM-2
+    env.json(&["start", "APM-2"]); // doing (position 2 in APM)
+    assert_eq!(
+        list(&env, &["--sort", "status"]),
+        ["APM-1", "APM-2", "B-1", "B-2"]
+    );
+    assert_eq!(
+        list(&env, &["--sort", "-status"]),
+        ["APM-2", "APM-1", "B-2", "B-1"]
     );
 }
 

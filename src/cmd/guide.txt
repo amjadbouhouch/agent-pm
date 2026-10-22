@@ -30,6 +30,7 @@ WORKFLOW
   apm list --search "clap" --sort -priority,due --limit 5   # title, body, comments
   apm list --overdue                                 # open tasks due before now
   apm edit APM-2 --due 2026-11-20T17:00+01:00        # stored in UTC
+  apm list --due-after 2026-11-01 --due-before 2026-12-01
   apm show APM-1                                     # fields, subtasks, attrs, comments
   apm edit APM-1 --priority urgent --unset due
   apm milestone list -p APM                          # progress done/total
@@ -56,7 +57,7 @@ VALUES
             start = first active, done = first done, block = the status named blocked.
   Priority: none (default) | low | medium | high | urgent
   Due:      YYYY-MM-DD, or YYYY-MM-DDTHH:MM[:SS] with Z or ±HH:MM (stored as UTC ...Z).
-            A date bound (--due-before/--due-after) compares the date part of a due.
+            A date bound (--due-before/--due-after) compares the UTC date part of a due.
   Sort:     id created updated due priority status title; -key = descending; no due last.
   Checkbox: true/false/yes/no/1/0. Date attributes: YYYY-MM-DD; datetime: like due.
   `list` hides done/cancelled-category tasks unless --all or --status.
