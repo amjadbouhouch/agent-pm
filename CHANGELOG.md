@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## [0.3.0](https://github.com/amjadbouhouch/agent-pm/compare/v0.2.0...v0.3.0) (2026-10-22)
+
+### Features
+
+* add claims with next, claim, release and claims ([c42339e](https://github.com/amjadbouhouch/agent-pm/commit/c42339e194e1300d69020e2fb1327054622f5b51))
+* add export, import and backup commands ([9e0de08](https://github.com/amjadbouhouch/agent-pm/commit/9e0de0814fff09b8d8b6b3ad28b67f1c98fc6f3a))
+* add install.ps1 Windows installer ([7e559e2](https://github.com/amjadbouhouch/agent-pm/commit/7e559e2806265d713389f08fb6b534fbded77fb4))
+
+### Bug Fixes
+
+* **claim:** address D1 review round 1 ([88768f1](https://github.com/amjadbouhouch/agent-pm/commit/88768f1cfefb2231c4a90471f91217f9b96c50bb))
+* **db:** derive the event-kind list from the enum; plain error value ([2e3f592](https://github.com/amjadbouhouch/agent-pm/commit/2e3f592b5456e097f9b8ec18b5bffd49cb561545))
+* **install.ps1:** address review round 1 ([2d85c65](https://github.com/amjadbouhouch/agent-pm/commit/2d85c65a06b1de193cb340099175adb3739c82b7))
+* **port:** enforce command rules on import, harden backup and export ([6f61b88](https://github.com/amjadbouhouch/agent-pm/commit/6f61b8834cf491c7bbb96c45b3bf1f2a6aa7b1ef))
+* **port:** reject unknown event kinds on import; test claims across export/import ([6acac77](https://github.com/amjadbouhouch/agent-pm/commit/6acac7738f55427c666479be61736c300412aad5))
+* **show:** indent multi-line bodies and comment continuation lines ([25307d8](https://github.com/amjadbouhouch/agent-pm/commit/25307d81a1dbb118908c34368922a8557de57900))
+
+### Documentation
+
+* document the Windows installer ([9121131](https://github.com/amjadbouhouch/agent-pm/commit/91211310c945456ba3f7479f58f8125526b5c6c0))
+* install.ps1 scriptblock form, env pinning, uninstall PATH ([3ce3d24](https://github.com/amjadbouhouch/agent-pm/commit/3ce3d24b203c68ac08e561383819735cdb6e21f7))
+* reflow the backup paragraph in README ([ca8d16c](https://github.com/amjadbouhouch/agent-pm/commit/ca8d16c9a70c0312223eb025c6387b42f40055a9))
 ## [0.2.0](https://github.com/amjadbouhouch/agent-pm/compare/v0.1.0...v0.2.0) (2026-10-22)
 
 ### Features
