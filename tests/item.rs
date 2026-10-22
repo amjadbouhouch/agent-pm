@@ -655,3 +655,67 @@ fn concurrent_adds_get_distinct_numbers() {
     all.dedup();
     assert_eq!(all.len(), 30);
 }
+
+// ---- long text: stdin and files
+
+#[test]
+fn body_from_stdin_or_a_file() {
+    let env = env_apm();
+    let md = "# Plan\n\n- step 1\n- `apm add \"x\" -p APM`\n";
+    let i = env.json_stdin(&["add", "t", "-p", "APM", "-b", "-"], md);
+    // Stored verbatim, minus the trailing newline.
+    assert_eq!(i["body"], "# Plan\n\n- step 1\n- `apm add \"x\" -p APM`");
+    let i = env.json_stdin(&["edit", "APM-1", "-b", "-"], "  indented\nsecond\n\n");
+    assert_eq!(i["body"], "  indented\nsecond");
+    let path = env.dir.path().join("body.md");
+    std::fs::write(&path, "from a file\r\n").unwrap();
+    let path = path.to_str().unwrap();
+    assert_eq!(
+        env.json(&["edit", "APM-1", "--body-file", path])["body"],
+        "from a file"
+    );
+    assert_eq!(
+        env.json(&["add", "u", "-p", "APM", "--body-file", path])["body"],
+        "from a file"
+    );
+    // Inline text is kept exactly, trailing newline included.
+    assert_eq!(
+        env.json(&["edit", "APM-1", "-b", "inline\n"])["body"],
+        "inline\n"
+    );
+}
+
+#[test]
+fn body_input_errors() {
+    let env = env_apm();
+    env.apm()
+        .args([
+            "--json",
+            "add",
+            "t",
+            "-p",
+            "APM",
+            "-b",
+            "x",
+            "--body-file",
+            "f.md",
+        ])
+        .assert()
+        .code(2);
+    let missing = env.dir.path().join("missing.md");
+    let missing = missing.to_str().unwrap();
+    assert!(
+        env.json_err(&["add", "t", "-p", "APM", "--body-file", missing])
+            .starts_with(&format!("cannot read {missing}: "))
+    );
+    assert_eq!(env.json(&["list", "--all"]), serde_json::json!([]));
+    env.json(&["add", "t", "-p", "APM"]);
+    let out = env
+        .apm()
+        .args(["--json", "edit", "APM-1", "-b", "-", "--unset", "body"])
+        .write_stdin("x")
+        .assert()
+        .failure();
+    let v: Value = serde_json::from_slice(&out.get_output().stderr).unwrap();
+    assert_eq!(v["error"], "cannot both set and unset body");
+}

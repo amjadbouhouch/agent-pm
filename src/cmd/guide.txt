@@ -69,6 +69,8 @@ VALUES
   Category: todo | active | done | cancelled. New tasks get the first todo status;
             start = first active, done = first done, block = the status named blocked.
   Priority: none (default) | low | medium | high | urgent
+  Text:     bodies and comments are Markdown by convention, stored verbatim. Long text:
+            -b - (stdin) or --body-file PATH on add/edit; comment KEY-N - or --file PATH.
   Dates:    YYYY-MM-DD. Checkbox: true/false/yes/no/1/0.
   `list` hides done/cancelled-category tasks unless --all or --status.
   Blocked: open, with an open blocker or in a status named blocked; else --ready.
@@ -83,7 +85,7 @@ COMMANDS
   status list|add|edit|rm         custom statuses, -p KEY; a project keeps at least one
   milestone add|list|show|edit|close|reopen|rm   -p KEY; rm keeps its tasks
   attr add|edit|list|rm           custom attributes, -p KEY; edit --rename
-  comment KEY-N TEXT              add a comment
+  comment KEY-N TEXT|-            add a comment (- reads stdin; --file PATH)
   guide                           this text
   db                              database path and schema version
   Every command has --help.

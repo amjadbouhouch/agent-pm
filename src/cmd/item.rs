@@ -3,6 +3,7 @@
 use clap::{Args, ValueEnum};
 use rusqlite::types::Value as SqlValue;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use rusqlite::{Connection, params, params_from_iter};
 use serde::Serialize;
@@ -52,9 +53,12 @@ pub struct AddArgs {
     /// Due date, YYYY-MM-DD
     #[arg(long)]
     pub due: Option<String>,
-    /// Longer description
+    /// Longer description, Markdown by convention; `-` reads stdin
     #[arg(short, long)]
     pub body: Option<String>,
+    /// Read the body from a file
+    #[arg(long, value_name = "PATH", conflicts_with = "body")]
+    pub body_file: Option<PathBuf>,
     /// Custom attribute value, name=value (repeatable)
     #[arg(long = "set", value_name = "NAME=VALUE", value_parser = parse_pair)]
     pub set: Vec<(String, String)>,
@@ -99,8 +103,12 @@ pub struct EditArgs {
     pub key: String,
     #[arg(long)]
     pub title: Option<String>,
+    /// New body, Markdown by convention; `-` reads stdin
     #[arg(short, long)]
     pub body: Option<String>,
+    /// Read the new body from a file
+    #[arg(long, value_name = "PATH", conflicts_with = "body")]
+    pub body_file: Option<PathBuf>,
     /// A status of the task's project
     #[arg(long)]
     pub status: Option<String>,
@@ -184,8 +192,9 @@ const SELECT: &str = "
     LEFT JOIN milestones m ON m.id = i.milestone_id
     LEFT JOIN items par ON par.id = i.parent_id";
 
-pub fn add(ctx: &Ctx, args: AddArgs) -> Result<()> {
+pub fn add(ctx: &Ctx, mut args: AddArgs) -> Result<()> {
     check_title(&args.title)?;
+    args.body = super::read_text(args.body.take(), args.body_file.as_deref())?;
     let tx = db::write_tx(&ctx.conn)?;
     let parent = args
         .parent
@@ -459,7 +468,8 @@ pub fn show(ctx: &Ctx, args: ShowArgs) -> Result<()> {
     Ok(())
 }
 
-pub fn edit(ctx: &Ctx, args: EditArgs) -> Result<()> {
+pub fn edit(ctx: &Ctx, mut args: EditArgs) -> Result<()> {
+    args.body = super::read_text(args.body.take(), args.body_file.as_deref())?;
     let tx = db::write_tx(&ctx.conn)?;
     let item = db::item(&tx, &args.key)?;
     let nothing = args.title.is_none()

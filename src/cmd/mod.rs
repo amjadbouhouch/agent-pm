@@ -13,10 +13,13 @@ pub mod project;
 pub mod status;
 pub mod tag;
 
+use std::io::Read;
+use std::path::Path;
+
 use rusqlite::Connection;
 
 use crate::cli::{self, Cli, Command};
-use crate::error::Result;
+use crate::error::{Result, err};
 use status::Shortcut;
 
 /// What every command gets: the open database, the output mode and the actor.
@@ -58,4 +61,24 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Db => db::run(&ctx, &path),
         Command::Guide => unreachable!("handled before opening the database"),
     }
+}
+
+/// Long text (a body or a comment) given inline, as `-` (read stdin) or from a file; None when
+/// neither is given. Inline text is kept as is; read text loses its trailing newlines (a heredoc
+/// or an editor adds one). The caller's clap args make inline and file mutually exclusive.
+pub fn read_text(inline: Option<String>, file: Option<&Path>) -> Result<Option<String>> {
+    let text = match (inline, file) {
+        (Some(t), _) if t == "-" => {
+            let mut s = String::new();
+            std::io::stdin()
+                .read_to_string(&mut s)
+                .map_err(|e| err(format!("cannot read stdin: {e}")))?;
+            s
+        }
+        (Some(t), _) => return Ok(Some(t)),
+        (None, Some(path)) => std::fs::read_to_string(path)
+            .map_err(|e| err(format!("cannot read {}: {e}", path.display())))?,
+        (None, None) => return Ok(None),
+    };
+    Ok(Some(text.trim_end_matches(['\n', '\r']).to_string()))
 }
