@@ -87,3 +87,18 @@ fn comment_errors() {
         .code(1)
         .stderr("error: comment text cannot be empty\n");
 }
+
+#[test]
+fn comment_bumps_item_updated_at() {
+    let env = Env::new();
+    seed(&env);
+    env.conn()
+        .execute("UPDATE items SET updated_at = '2000-01-01T00:00:00Z'", [])
+        .unwrap();
+    env.json(&["comment", "APM-1", "ping"]);
+    let updated: String = env
+        .conn()
+        .query_row("SELECT updated_at FROM items", [], |r| r.get(0))
+        .unwrap();
+    assert_ne!(updated, "2000-01-01T00:00:00Z");
+}

@@ -44,15 +44,21 @@ pub fn run(ctx: &Ctx, args: CommentArgs) -> Result<()> {
     if args.text.trim().is_empty() {
         return Err(err("comment text cannot be empty"));
     }
-    ctx.conn.execute(
+    // A comment is activity on the task: bump its updated_at in the same transaction.
+    let tx = ctx.conn.unchecked_transaction()?;
+    tx.execute(
         "INSERT INTO comments (item_id, author, body) VALUES (?1, ?2, ?3)",
         params![item.id, ctx.actor, args.text],
     )?;
-    let c = ctx.conn.query_row(
-        &format!("{SELECT} WHERE c.id = ?1"),
-        params![ctx.conn.last_insert_rowid()],
-        row,
+    let id = tx.last_insert_rowid();
+    tx.execute(
+        "UPDATE items SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?1",
+        params![item.id],
     )?;
+    tx.commit()?;
+    let c = ctx
+        .conn
+        .query_row(&format!("{SELECT} WHERE c.id = ?1"), params![id], row)?;
     if ctx.json {
         output::json(&c)
     } else {

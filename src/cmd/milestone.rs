@@ -168,22 +168,26 @@ fn find(conn: &Connection, project: &str, name: &str) -> Result<i64> {
     resolve(conn, db::project_id(conn, project)?, name)
 }
 
-fn check_name(conn: &Connection, project_id: i64, name: &str) -> Result<()> {
-    if name.trim().is_empty() {
+/// A new milestone name, trimmed; empty is an error.
+fn clean_name(name: &str) -> Result<&str> {
+    let name = name.trim();
+    if name.is_empty() {
         return Err(err("milestone name cannot be empty"));
     }
-    let taken = conn
-        .query_row(
-            "SELECT 1 FROM milestones WHERE project_id = ?1 AND name = ?2",
-            params![project_id, name],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some();
-    if taken {
-        return Err(err(format!("milestone already exists: {name}")));
+    Ok(name)
+}
+
+/// Map a write's UNIQUE(project_id, name) failure to a clear error. The constraint, not a
+/// pre-check, decides: several agents may write at once.
+fn unique(res: rusqlite::Result<usize>, name: &str) -> Result<usize> {
+    match res {
+        Err(rusqlite::Error::SqliteFailure(e, _))
+            if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
+        {
+            Err(err(format!("milestone already exists: {name}")))
+        }
+        res => Ok(res?),
     }
-    Ok(())
 }
 
 /// Print a written milestone: the full object under `--json`, else `<verb> milestone <name>`.
@@ -205,13 +209,16 @@ fn add(
     due: Option<String>,
 ) -> Result<()> {
     let project_id = db::project_id(&ctx.conn, project)?;
-    check_name(&ctx.conn, project_id, name)?;
+    let name = clean_name(name)?;
     if let Some(d) = &due {
         model::check_date(d)?;
     }
-    ctx.conn.execute(
-        "INSERT INTO milestones (project_id, name, description, due) VALUES (?1, ?2, ?3, ?4)",
-        params![project_id, name, description.unwrap_or_default(), due],
+    unique(
+        ctx.conn.execute(
+            "INSERT INTO milestones (project_id, name, description, due) VALUES (?1, ?2, ?3, ?4)",
+            params![project_id, name, description.unwrap_or_default(), due],
+        ),
+        name,
     )?;
     written(ctx, ctx.conn.last_insert_rowid(), "created")
 }
@@ -308,9 +315,7 @@ fn edit(
     }
     let project_id = db::project_id(&ctx.conn, project)?;
     let id = resolve(&ctx.conn, project_id, name)?;
-    if let Some(new) = rename.as_deref().filter(|n| *n != name) {
-        check_name(&ctx.conn, project_id, new)?;
-    }
+    let rename = rename.as_deref().map(clean_name).transpose()?;
     // Some("") clears the due date.
     let due = due.map(|d| {
         if d.is_empty() {
@@ -320,14 +325,17 @@ fn edit(
         }
     });
     let due = due.transpose()?;
-    ctx.conn.execute(
-        "UPDATE milestones SET
-            name = COALESCE(?2, name),
-            description = COALESCE(?3, description),
-            due = CASE WHEN ?4 THEN ?5 ELSE due END,
-            updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-         WHERE id = ?1",
-        params![id, rename, description, due.is_some(), due.flatten()],
+    unique(
+        ctx.conn.execute(
+            "UPDATE milestones SET
+                name = COALESCE(?2, name),
+                description = COALESCE(?3, description),
+                due = CASE WHEN ?4 THEN ?5 ELSE due END,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+             WHERE id = ?1",
+            params![id, rename, description, due.is_some(), due.flatten()],
+        ),
+        rename.unwrap_or(name),
     )?;
     written(ctx, id, "updated")
 }

@@ -361,3 +361,48 @@ fn rm_keeps_tasks() {
         .success()
         .stdout("removed milestone v2\n");
 }
+
+#[test]
+fn names_are_trimmed() {
+    let env = Env::new();
+    project(&env, "APM");
+    assert_eq!(
+        env.json(&["milestone", "add", " v1 ", "-p", "APM"])["name"],
+        "v1"
+    );
+    assert_eq!(
+        env.json_err(&["milestone", "add", "v1", "-p", "APM"]),
+        "milestone already exists: v1"
+    );
+    env.json(&["milestone", "add", "v2", "-p", "APM"]);
+    assert_eq!(
+        env.json_err(&["milestone", "edit", "v2", "-p", "APM", "--rename", " v1"]),
+        "milestone already exists: v1"
+    );
+    assert_eq!(
+        env.json(&["milestone", "edit", "v2", "-p", "APM", "--rename", "v3 "])["name"],
+        "v3"
+    );
+    assert_eq!(
+        env.json(&["milestone", "list", "-p", "APM"])
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn unknown_project_errors() {
+    let env = Env::new();
+    for cmd in ["show", "close", "reopen", "rm"] {
+        assert_eq!(
+            env.json_err(&["milestone", cmd, "v1", "-p", "nope"]),
+            "no such project: NOPE"
+        );
+    }
+    assert_eq!(
+        env.json_err(&["milestone", "edit", "v1", "-p", "NOPE", "-d", "x"]),
+        "no such project: NOPE"
+    );
+}
