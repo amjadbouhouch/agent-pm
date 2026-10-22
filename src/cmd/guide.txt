@@ -1,0 +1,58 @@
+apm: a small project tracker for agents and humans (projects, milestones, tasks,
+subtasks, assignees, comments, custom attributes). One SQLite file, no server.
+
+SETUP
+  Database: --db PATH > $APM_DB > ~/.agent-pm/apm.db (created on first use).
+  Actor:    --as NAME > $APM_AGENT > OS user. Recorded as created_by and comment author.
+  Agents: set APM_AGENT once per session and always pass --json.
+
+JSON CONTRACT (--json, works on every command)
+  Success: one JSON object or array on stdout. Writes return the written object.
+  Errors:  {"error": "<msg>"} on stderr. Exit 1 = command failed, 2 = invalid arguments.
+  Without --json: short text lines, errors as `error: <msg>`. apm never prompts.
+
+IDS
+  Project KEY: 1-10 letters/digits, starting with a letter (APM). Case-insensitive.
+  Task KEY-N: APM-12, numbered per project, never reused.
+  Milestones and custom attributes are named within a project (-p KEY).
+
+WORKFLOW
+  apm project add APM "agent-pm" -d "the tracker"
+  apm milestone add v1 -p APM --due 2026-12-01
+  apm add "parse args" -p APM -m v1 -a alice --priority high
+  apm add "flag tests" --parent APM-1                # subtask, same project
+  apm start APM-1                                    # status: doing
+  apm comment APM-1 "clap derive works; tests next"
+  apm done APM-2
+  apm list -p APM -a alice                           # open tasks only
+  apm list -p APM --status done,cancelled            # explicit statuses
+  apm list -m v1 --all                               # include done/cancelled
+  apm show APM-1                                     # fields, subtasks, attrs, comments
+  apm edit APM-1 --priority urgent --unset due
+  apm milestone list -p APM                          # progress done/total
+  apm milestone close v1 -p APM
+
+CUSTOM ATTRIBUTES
+  apm attr add size -p APM --type select --options s,m,l
+  apm attr add points -p APM --type number           # types: text number select date checkbox
+  apm add "cache layer" -p APM --set size=m --set points=3
+  apm list -p APM --where size=m
+  apm edit APM-3 --unset points
+  apm attr list -p APM
+
+VALUES
+  Status:   todo (default) | doing | blocked | done | cancelled
+  Priority: none (default) | low | medium | high | urgent
+  Dates:    YYYY-MM-DD. Checkbox: true/false/yes/no/1/0.
+  `list` hides done/cancelled unless --all or --status.
+
+COMMANDS
+  project add|list|show|edit|rm   manage projects (rm deletes everything in it)
+  add | list | show | edit | rm   tasks; filters: -p --status -a -m --parent --where
+  start | done | block            status shortcuts
+  milestone add|list|show|edit|close|reopen|rm   -p KEY; rm keeps its tasks
+  attr add|list|rm                custom attributes, -p KEY
+  comment KEY-N TEXT              add a comment
+  guide                           this text
+  db                              database path and schema version
+  Every command has --help.
