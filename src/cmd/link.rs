@@ -91,7 +91,7 @@ impl Links {
 pub fn link(ctx: &Ctx, args: LinkArgs) -> Result<()> {
     let tx = db::write_tx(&ctx.conn)?;
     let (from, to) = ends(&tx, &args)?;
-    let (from_key, to_key) = (key_of(&tx, from)?, key_of(&tx, to)?);
+    let (from_key, to_key) = (db::current_key(&tx, from)?, db::current_key(&tx, to)?);
     let shown = Link {
         from: from_key.clone(),
         kind: args.kind.as_str(),
@@ -131,7 +131,7 @@ pub fn link(ctx: &Ctx, args: LinkArgs) -> Result<()> {
 pub fn unlink(ctx: &Ctx, args: LinkArgs) -> Result<()> {
     let tx = db::write_tx(&ctx.conn)?;
     let (from, to) = ends(&tx, &args)?;
-    let (from_key, to_key) = (key_of(&tx, from)?, key_of(&tx, to)?);
+    let (from_key, to_key) = (db::current_key(&tx, from)?, db::current_key(&tx, to)?);
     let kind = args.kind.as_str();
     let (stored_from, stored_to) = find(&tx, from, args.kind, to)?
         .ok_or_else(|| err(format!("no such link: {from_key} {kind} {to_key}")))?;
@@ -218,7 +218,7 @@ fn ends(conn: &Connection, args: &LinkArgs) -> Result<(i64, i64)> {
     if from == to {
         return Err(err(format!(
             "a task cannot link to itself: {}",
-            key_of(conn, from)?
+            db::current_key(conn, from)?
         )));
     }
     Ok((from, to))
@@ -264,7 +264,7 @@ fn check_cycle(conn: &Connection, from: i64, to: i64) -> Result<()> {
                 path.push(from);
                 let keys = path
                     .iter()
-                    .map(|&p| key_of(conn, p))
+                    .map(|&p| db::current_key(conn, p))
                     .collect::<Result<Vec<_>>>()?;
                 return Err(err(format!("blocks cycle: {}", keys.join(" blocks "))));
             }
@@ -306,16 +306,6 @@ fn record(
         )?;
     }
     Ok(())
-}
-
-/// A task's current `KEY-N`.
-fn key_of(conn: &Connection, id: i64) -> Result<String> {
-    Ok(conn.query_row(
-        "SELECT p.key || '-' || i.seq FROM items i JOIN projects p ON p.id = i.project_id
-         WHERE i.id = ?1",
-        params![id],
-        |r| r.get(0),
-    )?)
 }
 
 /// `APM-12` as (`APM`, 12), so `APM-2` sorts before `APM-10`.

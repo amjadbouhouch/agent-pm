@@ -451,6 +451,16 @@ pub fn item_key(key: &str, seq: i64) -> String {
     format!("{key}-{seq}")
 }
 
+/// A task's current `KEY-N` by row id (never an alias).
+pub fn current_key(conn: &Connection, item_id: i64) -> Result<String> {
+    Ok(conn.query_row(
+        "SELECT p.key || '-' || i.seq FROM items i JOIN projects p ON p.id = i.project_id
+         WHERE i.id = ?1",
+        params![item_id],
+        |r| r.get(0),
+    )?)
+}
+
 /// An item found by its `KEY-N` reference.
 #[derive(Debug, Clone, Copy)]
 pub struct ItemRef {
