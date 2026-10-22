@@ -136,8 +136,6 @@ const SELECT: &str = "
     LEFT JOIN milestones m ON m.id = i.milestone_id
     LEFT JOIN items par ON par.id = i.parent_id";
 
-const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%SZ', 'now')";
-
 pub fn add(ctx: &Ctx, args: AddArgs) -> Result<()> {
     check_title(&args.title)?;
     let tx = write_tx(&ctx.conn)?;
@@ -198,7 +196,8 @@ pub fn add(ctx: &Ctx, args: AddArgs) -> Result<()> {
     let id = tx.last_insert_rowid();
     attr::set_values(&tx, project_id, id, &args.set)?;
     tx.commit()?;
-    print_written(ctx, &get(&ctx.conn, id)?, "created")
+    let item = get(&ctx.conn, id)?;
+    output::written(ctx.json, &item, &format!("created {}", item.id))
 }
 
 pub fn list(ctx: &Ctx, args: ListArgs) -> Result<()> {
@@ -435,7 +434,7 @@ pub fn edit(ctx: &Ctx, args: EditArgs) -> Result<()> {
         };
         set(col, cleared);
     }
-    sets.push(format!("updated_at = {NOW}"));
+    sets.push(format!("updated_at = {}", db::NOW_SQL));
     let id_mark = bind(&mut vals, item.id);
     tx.execute(
         &format!("UPDATE items SET {} WHERE id = {id_mark}", sets.join(", ")),
@@ -443,22 +442,26 @@ pub fn edit(ctx: &Ctx, args: EditArgs) -> Result<()> {
     )?;
     attr::set_values(&tx, item.project_id, item.id, &args.set)?;
     tx.commit()?;
-    print_written(ctx, &get(&ctx.conn, item.id)?, "updated")
+    let item = get(&ctx.conn, item.id)?;
+    output::written(ctx.json, &item, &format!("updated {}", item.id))
 }
 
 pub fn set_status(ctx: &Ctx, args: KeyArg, status: Status) -> Result<()> {
     let conn = &ctx.conn;
     let item = db::item(conn, &args.key)?;
     conn.execute(
-        &format!("UPDATE items SET status = ?1, updated_at = {NOW} WHERE id = ?2"),
+        &format!(
+            "UPDATE items SET status = ?1, updated_at = {} WHERE id = ?2",
+            db::NOW_SQL
+        ),
         params![status.as_str(), item.id],
     )?;
     let item = get(conn, item.id)?;
-    if ctx.json {
-        return output::json(&item);
-    }
-    println!("updated {} ({})", item.id, item.status);
-    Ok(())
+    output::written(
+        ctx.json,
+        &item,
+        &format!("updated {} ({})", item.id, item.status),
+    )
 }
 
 pub fn rm(ctx: &Ctx, args: KeyArg) -> Result<()> {
@@ -475,14 +478,11 @@ pub fn rm(ctx: &Ctx, args: KeyArg) -> Result<()> {
     // Subtasks, values and comments go with it (ON DELETE CASCADE).
     tx.execute("DELETE FROM items WHERE id = ?1", params![r.id])?;
     tx.commit()?;
-    if ctx.json {
-        return output::json(&item);
-    }
-    match subtasks {
-        0 => println!("deleted {}", item.id),
-        n => println!("deleted {} and {n} subtask(s)", item.id),
-    }
-    Ok(())
+    let line = match subtasks {
+        0 => format!("deleted {}", item.id),
+        n => format!("deleted {} and {n} subtask(s)", item.id),
+    };
+    output::written(ctx.json, &item, &line)
 }
 
 /// A transaction that takes the write lock up front, so a read-then-write cannot fail with
@@ -572,7 +572,7 @@ fn check_title(title: &str) -> Result<()> {
 /// `apm-01` as `APM-1`, for messages (the reference is already validated).
 fn canonical(reference: &str) -> String {
     match db::parse_item_key(reference) {
-        Ok((key, n)) => format!("{key}-{n}"),
+        Ok((key, n)) => db::item_key(&key, n),
         Err(_) => reference.to_string(),
     }
 }
@@ -581,13 +581,4 @@ fn canonical(reference: &str) -> String {
 fn bind(vals: &mut Vec<SqlValue>, v: impl Into<SqlValue>) -> String {
     vals.push(v.into());
     format!("?{}", vals.len())
-}
-
-/// `created APM-3`, or the item as JSON.
-fn print_written(ctx: &Ctx, item: &Item, verb: &str) -> Result<()> {
-    if ctx.json {
-        return output::json(item);
-    }
-    println!("{verb} {}", item.id);
-    Ok(())
 }

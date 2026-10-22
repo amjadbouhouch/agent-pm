@@ -177,28 +177,15 @@ fn clean_name(name: &str) -> Result<&str> {
     Ok(name)
 }
 
-/// Map a write's UNIQUE(project_id, name) failure to a clear error. The constraint, not a
-/// pre-check, decides: several agents may write at once.
-fn unique(res: rusqlite::Result<usize>, name: &str) -> Result<usize> {
-    match res {
-        Err(rusqlite::Error::SqliteFailure(e, _))
-            if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
-        {
-            Err(err(format!("milestone already exists: {name}")))
-        }
-        res => Ok(res?),
-    }
+/// The UNIQUE(project_id, name) error, for `db::unique`.
+fn exists(name: &str) -> crate::error::AppError {
+    err(format!("milestone already exists: {name}"))
 }
 
 /// Print a written milestone: the full object under `--json`, else `<verb> milestone <name>`.
 fn written(ctx: &Ctx, id: i64, verb: &str) -> Result<()> {
     let m = load(&ctx.conn, id)?;
-    if ctx.json {
-        output::json(&m)
-    } else {
-        println!("{verb} milestone {}", m.name);
-        Ok(())
-    }
+    output::written(ctx.json, &m, &format!("{verb} milestone {}", m.name))
 }
 
 fn add(
@@ -213,12 +200,12 @@ fn add(
     if let Some(d) = &due {
         model::check_date(d)?;
     }
-    unique(
+    db::unique(
         ctx.conn.execute(
             "INSERT INTO milestones (project_id, name, description, due) VALUES (?1, ?2, ?3, ?4)",
             params![project_id, name, description.unwrap_or_default(), due],
         ),
-        name,
+        || exists(name),
     )?;
     written(ctx, ctx.conn.last_insert_rowid(), "created")
 }
@@ -262,7 +249,7 @@ fn show(ctx: &Ctx, project: &str, name: &str) -> Result<()> {
     let items = stmt
         .query_map(params![m.id], |r| {
             Ok(MilestoneItem {
-                id: format!("{}-{}", m.project, r.get::<_, i64>(0)?),
+                id: db::item_key(&m.project, r.get(0)?),
                 status: r.get(1)?,
                 title: r.get(2)?,
                 assignee: r.get(3)?,
@@ -325,17 +312,20 @@ fn edit(
         }
     });
     let due = due.transpose()?;
-    unique(
+    db::unique(
         ctx.conn.execute(
-            "UPDATE milestones SET
-                name = COALESCE(?2, name),
-                description = COALESCE(?3, description),
-                due = CASE WHEN ?4 THEN ?5 ELSE due END,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-             WHERE id = ?1",
+            &format!(
+                "UPDATE milestones SET
+                    name = COALESCE(?2, name),
+                    description = COALESCE(?3, description),
+                    due = CASE WHEN ?4 THEN ?5 ELSE due END,
+                    updated_at = {}
+                 WHERE id = ?1",
+                db::NOW_SQL
+            ),
             params![id, rename, description, due.is_some(), due.flatten()],
         ),
-        rename.unwrap_or(name),
+        || exists(rename.unwrap_or(name)),
     )?;
     written(ctx, id, "updated")
 }
@@ -344,8 +334,10 @@ fn edit(
 fn set_status(ctx: &Ctx, project: &str, name: &str, status: &str) -> Result<()> {
     let id = find(&ctx.conn, project, name)?;
     ctx.conn.execute(
-        "UPDATE milestones SET status = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-         WHERE id = ?1 AND status != ?2",
+        &format!(
+            "UPDATE milestones SET status = ?2, updated_at = {} WHERE id = ?1 AND status != ?2",
+            db::NOW_SQL
+        ),
         params![id, status],
     )?;
     written(
@@ -364,10 +356,5 @@ fn rm(ctx: &Ctx, project: &str, name: &str) -> Result<()> {
     let m = load(&ctx.conn, find(&ctx.conn, project, name)?)?;
     ctx.conn
         .execute("DELETE FROM milestones WHERE id = ?1", params![m.id])?;
-    if ctx.json {
-        output::json(&m)
-    } else {
-        println!("removed milestone {}", m.name);
-        Ok(())
-    }
+    output::written(ctx.json, &m, &format!("removed milestone {}", m.name))
 }

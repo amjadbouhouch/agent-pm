@@ -3,15 +3,10 @@ mod common;
 use common::Env;
 use serde_json::json;
 
-/// An env with project APM (no `project add` on this branch yet, so raw SQL).
+/// An env with project APM.
 fn env() -> Env {
     let env = Env::new();
-    env.conn()
-        .execute(
-            "INSERT INTO projects (key, name) VALUES ('APM', 'agent-pm')",
-            [],
-        )
-        .unwrap();
+    env.json(&["project", "add", "APM", "agent-pm"]);
     env
 }
 
@@ -126,9 +121,7 @@ fn add_rejects_unknown_project_and_type() {
 #[test]
 fn same_name_in_two_projects() {
     let env = env();
-    env.conn()
-        .execute("INSERT INTO projects (key, name) VALUES ('WEB', 'web')", [])
-        .unwrap();
+    env.json(&["project", "add", "WEB", "web"]);
     env.json(&["attr", "add", "points", "-p", "APM", "--type", "number"]);
     let v = env.json(&["attr", "add", "points", "-p", "WEB", "--type", "text"]);
     assert_eq!(v["project"], "WEB");
@@ -176,20 +169,19 @@ fn list_in_creation_order() {
 fn rm_deletes_attribute_and_values() {
     let env = env();
     env.json(&["attr", "add", "note", "-p", "APM", "--type", "text"]);
-    let conn = env.conn();
-    conn.execute_batch(
-        "INSERT INTO items (project_id, seq, title, created_by) VALUES (1, 1, 't', 'x');
-         INSERT INTO item_values (item_id, attribute_id, value)
-             SELECT 1, id, 'hello' FROM attributes WHERE name = 'note';",
-    )
-    .unwrap();
+    env.json(&["add", "t", "-p", "APM", "--set", "note=hello"]);
+    assert_eq!(
+        env.json(&["show", "APM-1"])["attributes"],
+        json!({"note": "hello"})
+    );
     let v = env.json(&["attr", "rm", "note", "-p", "apm"]);
     assert_eq!(v["name"], "note");
     assert_eq!(env.json(&["attr", "list", "-p", "APM"]), json!([]));
-    let left: i64 = conn
-        .query_row("SELECT count(*) FROM item_values", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(left, 0);
+    assert_eq!(env.json(&["show", "APM-1"])["attributes"], json!({}));
+    // A new attribute of the same name starts empty.
+    env.json(&["attr", "add", "note", "-p", "APM", "--type", "text"]);
+    assert_eq!(env.json(&["show", "APM-1"])["attributes"], json!({}));
+    env.json(&["attr", "rm", "note", "-p", "APM"]);
     assert_eq!(
         env.json_err(&["attr", "rm", "note", "-p", "APM"]),
         "no such attribute: note"

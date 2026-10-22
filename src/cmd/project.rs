@@ -1,7 +1,7 @@
 //! Projects: a KEY, a name and a description. Tasks live in a project.
 
 use clap::{Subcommand, ValueEnum};
-use rusqlite::{Connection, Transaction, TransactionBehavior, ffi, params};
+use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 use serde::{Serialize, Serializer};
 
 use super::Ctx;
@@ -89,18 +89,13 @@ fn check_name(name: &str) -> Result<()> {
 fn add(ctx: &Ctx, key: &str, name: &str, description: Option<&str>) -> Result<()> {
     let key = db::check_project_key(key)?;
     check_name(name)?;
-    let inserted = ctx.conn.execute(
-        "INSERT INTO projects (key, name, description) VALUES (?1, ?2, ?3)",
-        params![key, name, description.unwrap_or("")],
-    );
-    match inserted {
-        Err(rusqlite::Error::SqliteFailure(e, _))
-            if e.extended_code == ffi::SQLITE_CONSTRAINT_UNIQUE =>
-        {
-            return Err(err(format!("project already exists: {key}")));
-        }
-        r => r?,
-    };
+    db::unique(
+        ctx.conn.execute(
+            "INSERT INTO projects (key, name, description) VALUES (?1, ?2, ?3)",
+            params![key, name, description.unwrap_or("")],
+        ),
+        || err(format!("project already exists: {key}")),
+    )?;
     let id = ctx.conn.last_insert_rowid();
     print_written(ctx, &get(&ctx.conn, id)?, "created")
 }
@@ -160,8 +155,11 @@ fn edit(ctx: &Ctx, key: &str, name: Option<&str>, description: Option<&str>) -> 
         check_name(name)?;
     }
     ctx.conn.execute(
-        "UPDATE projects SET name = coalesce(?1, name), description = coalesce(?2, description),
-         updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?3",
+        &format!(
+            "UPDATE projects SET name = coalesce(?1, name), description = coalesce(?2, description),
+             updated_at = {} WHERE id = ?3",
+            db::NOW_SQL
+        ),
         params![name, description, id],
     )?;
     print_written(ctx, &get(&ctx.conn, id)?, "updated")
@@ -179,11 +177,7 @@ fn rm(ctx: &Ctx, key: &str) -> Result<()> {
 
 /// `created APM`, or the project as JSON.
 fn print_written(ctx: &Ctx, project: &Project, verb: &str) -> Result<()> {
-    if ctx.json {
-        return output::json(project);
-    }
-    println!("{verb} {}", project.key);
-    Ok(())
+    output::written(ctx.json, project, &format!("{verb} {}", project.key))
 }
 
 /// A project by id.

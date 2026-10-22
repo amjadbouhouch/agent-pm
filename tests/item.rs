@@ -25,15 +25,9 @@ fn env_apm() -> Env {
     env
 }
 
-/// Seed a milestone (the milestone commands belong to another slice).
+/// Create milestone `name` in `project`.
 fn seed_milestone(env: &Env, project: &str, name: &str) {
-    env.conn()
-        .execute(
-            "INSERT INTO milestones (project_id, name)
-             SELECT id, ?2 FROM projects WHERE key = ?1",
-            [project, name],
-        )
-        .unwrap();
+    env.json(&["milestone", "add", name, "-p", project]);
 }
 
 // ---- add
@@ -296,13 +290,7 @@ fn show_includes_subtasks_and_comments() {
     env.json(&["add", "parent", "-p", "APM", "-b", "the body"]);
     env.json(&["add", "child", "--parent", "APM-1", "--status", "done"]);
     env.json(&["add", "other", "-p", "APM"]);
-    env.conn()
-        .execute(
-            "INSERT INTO comments (item_id, author, body) VALUES (
-                 (SELECT id FROM items WHERE seq = 1), 'alice', 'looks good')",
-            [],
-        )
-        .unwrap();
+    env.json(&["--as", "alice", "comment", "APM-1", "looks good"]);
     let v = env.json(&["show", "apm-1"]);
     assert_eq!(v["id"], "APM-1");
     assert_eq!(v["body"], "the body");

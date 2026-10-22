@@ -1,6 +1,3 @@
-// Scaffold: shared helpers are not called until S1-S3 land. orch removes this after they merge.
-#![allow(dead_code)]
-
 mod cli;
 mod cmd;
 mod db;

@@ -2,15 +2,10 @@ mod common;
 
 use common::Env;
 
-/// Seed project APM with task APM-1 (projects and tasks live in another slice).
+/// Project APM with task APM-1.
 fn seed(env: &Env) {
-    env.conn()
-        .execute_batch(
-            "INSERT INTO projects (key, name) VALUES ('APM', 'agent-pm');
-             INSERT INTO items (project_id, seq, title, created_by)
-             VALUES ((SELECT id FROM projects WHERE key = 'APM'), 1, 'a task', 'tester');",
-        )
-        .unwrap();
+    env.json(&["project", "add", "APM", "agent-pm"]);
+    env.json(&["add", "a task", "-p", "APM"]);
 }
 
 #[test]
@@ -27,23 +22,14 @@ fn comment_returns_the_comment() {
     let v = env.json(&["--as", "bot", "comment", "APM-1", "second"]);
     assert_eq!(v["author"], "bot");
 
-    let rows: Vec<(String, String)> = {
-        let conn = env.conn();
-        let mut stmt = conn
-            .prepare("SELECT author, body FROM comments ORDER BY id")
-            .unwrap();
-        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap()
-    };
-    assert_eq!(
-        rows,
-        [
-            ("tester".to_string(), "looks good".to_string()),
-            ("bot".to_string(), "second".to_string())
-        ]
-    );
+    let comments = &env.json(&["show", "APM-1"])["comments"];
+    let rows: Vec<(&str, &str)> = comments
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["author"].as_str().unwrap(), c["body"].as_str().unwrap()))
+        .collect();
+    assert_eq!(rows, [("tester", "looks good"), ("bot", "second")]);
 }
 
 #[test]

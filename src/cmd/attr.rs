@@ -214,35 +214,26 @@ fn add(ctx: &Ctx, name: &str, project: &str, kind: AttrType, options: Vec<String
     }
     // The UNIQUE (project_id, name) constraint is the duplicate check, so a concurrent add
     // of the same name gets the same error.
-    let inserted = ctx.conn.execute(
-        "INSERT INTO attributes (project_id, name, type, options) VALUES (?1, ?2, ?3, ?4)",
-        params![
-            project_id,
-            name,
-            kind.as_str(),
-            serde_json::to_string(&options)?
-        ],
-    );
-    match inserted {
-        Err(rusqlite::Error::SqliteFailure(e, _))
-            if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
-        {
-            return Err(err(format!("attribute already exists: {name}")));
-        }
-        r => r?,
-    };
+    db::unique(
+        ctx.conn.execute(
+            "INSERT INTO attributes (project_id, name, type, options) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                project_id,
+                name,
+                kind.as_str(),
+                serde_json::to_string(&options)?
+            ],
+        ),
+        || err(format!("attribute already exists: {name}")),
+    )?;
     let attr = Attr {
         id: ctx.conn.last_insert_rowid(),
         name: name.to_string(),
         kind,
         options,
     };
-    if ctx.json {
-        output::json(&attr.to_json(&project.to_uppercase()))
-    } else {
-        println!("added attribute {name}");
-        Ok(())
-    }
+    let line = format!("added attribute {name}");
+    output::written(ctx.json, &attr.to_json(&project.to_uppercase()), &line)
 }
 
 fn list(ctx: &Ctx, project: &str) -> Result<()> {
@@ -274,12 +265,8 @@ fn rm(ctx: &Ctx, name: &str, project: &str) -> Result<()> {
     // Values go with it (item_values.attribute_id ON DELETE CASCADE).
     ctx.conn
         .execute("DELETE FROM attributes WHERE id = ?1", params![attr.id])?;
-    if ctx.json {
-        output::json(&attr.to_json(&project.to_uppercase()))
-    } else {
-        println!("removed attribute {name}");
-        Ok(())
-    }
+    let line = format!("removed attribute {name}");
+    output::written(ctx.json, &attr.to_json(&project.to_uppercase()), &line)
 }
 
 /// Validate and store `name=value` pairs on a task. Used by item add/edit.

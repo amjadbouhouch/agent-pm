@@ -11,7 +11,7 @@ pub mod project;
 use rusqlite::Connection;
 
 use crate::cli::{self, Cli, Command};
-use crate::error::{Result, err};
+use crate::error::Result;
 use crate::model::Status;
 
 /// What every command gets: the open database, the output mode and the actor.
@@ -47,9 +47,4 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Db => db::run(&ctx, &path),
         Command::Guide => unreachable!("handled before opening the database"),
     }
-}
-
-/// Placeholder for commands a slice has not built yet. Remove with the last caller.
-pub fn not_implemented(what: &str) -> crate::error::AppError {
-    err(format!("not implemented yet: {what}"))
 }
