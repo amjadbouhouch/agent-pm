@@ -47,3 +47,34 @@ fn guide_does_not_touch_the_database() {
     env.apm().arg("guide").assert().success();
     assert!(!env.db_path().exists());
 }
+
+#[test]
+fn concurrent_first_opens_of_a_new_database() {
+    // Every process finds no file (or a rollback-journal one) and switches it to WAL; the
+    // switch needs an exclusive lock that SQLite does not wait for, so apm retries it.
+    let env = Env::new();
+    let workers: Vec<_> = (0..12)
+        .map(|_| {
+            let db = env.db_path();
+            std::thread::spawn(move || {
+                let out = std::process::Command::new(env!("CARGO_BIN_EXE_apm"))
+                    .env("APM_DB", &db)
+                    .env("APM_AGENT", "tester")
+                    .args(["--json", "db"])
+                    .output()
+                    .unwrap();
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                assert!(out.status.success(), "{stderr}");
+            })
+        })
+        .collect();
+    for w in workers {
+        w.join().unwrap();
+    }
+    assert_eq!(env.json(&["db"])["schema_version"], 2);
+    let mode: String = env
+        .conn()
+        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+}
