@@ -149,9 +149,11 @@ fn search_never_errors_on_user_text() {
     // Operators are words: `busy OR` needs both, `-busy` finds busy.
     assert!(ids(&env.json(&["search", "busy OR"])).is_empty());
     assert_eq!(ids(&env.json(&["search", "-busy", "-p", "APM"])).len(), 4);
+    // Punctuation inside a token keeps its words side by side: not the question
+    // "Is the timeout busy?".
     assert_eq!(
         ids(&env.json(&["search", "busy:timeout", "-p", "APM"])).len(),
-        4
+        3
     );
     assert_eq!(env.json(&["search", "\" - : * ("]), json!([]));
     assert_eq!(count_pages(&env), 3);
@@ -208,4 +210,70 @@ fn search_text_output() {
         .args(["--json", "search", "x", "--limit", "0"])
         .assert()
         .code(2);
+}
+
+#[test]
+fn search_lists_pages_then_log_entries() {
+    let env = Env::new();
+    env.json(&["project", "add", "APM", "agent-pm"]);
+    env.json(&["add", "first", "-p", "APM"]);
+    // Log entries that match better than the page on their own index still come after it.
+    let once = env.json(&[
+        "comment",
+        "APM-1",
+        "zebra crossing and other long words here",
+    ]);
+    let thrice = env.json(&["comment", "APM-1", "zebra zebra zebra"]);
+    env.json(&[
+        "page",
+        "add",
+        "APM:misc",
+        "Misc",
+        "-s",
+        "a zebra somewhere",
+        "-b",
+        "long text",
+    ]);
+    env.json(&["page", "add", "APM:zebra", "Zebra", "-b", "x"]);
+    let log = |c: &Value| format!("APM-1 #{}", c["id"]);
+    assert_eq!(
+        ids(&env.json(&["search", "zebra"])),
+        ["APM:zebra", "APM:misc", &log(&thrice), &log(&once)]
+    );
+    // --limit counts pages and log entries together.
+    assert_eq!(
+        ids(&env.json(&["search", "zebra", "--limit", "3"])),
+        ["APM:zebra", "APM:misc", &log(&thrice)]
+    );
+    assert_eq!(
+        ids(&env.json(&["search", "zebra", "--limit", "1"])),
+        ["APM:zebra"]
+    );
+    let out = env.apm().args(["search", "--help"]).assert().success();
+    let help = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    for line in [
+        "every word must match",
+        "OR, NOT, `*`, quotes and `-` are plain text",
+        "busy_timeout finds \"busy timeout\"",
+        "pages first, then log entries",
+        "Only pages and task log entries of project KEY",
+    ] {
+        assert!(help.contains(line), "{line} not in:\n{help}");
+    }
+}
+
+#[test]
+fn search_tokens_are_phrases() {
+    let env = Env::new();
+    seed(&env);
+    let apm = |q: &str| ids(&env.json(&["search", q, "-p", "APM"]));
+    // Separate words match anywhere; joined by punctuation they must be adjacent, in order.
+    assert_eq!(apm("timeout busy").len(), 4);
+    assert_eq!(apm("busy_timeout").len(), 3);
+    assert_eq!(apm("timeout_busy").len(), 1); // "Is the timeout busy?"
+    assert_eq!(apm("switch:wal").len(), 0);
+    assert_eq!(apm("wal:switch").len(), 1);
+    // Quotes in a token are doubled, not syntax; tokens without a letter or digit go.
+    assert_eq!(apm("\"busy\" - * ( \"timeout").len(), 4);
+    assert_eq!(apm("bu\"sy"), Vec::<String>::new());
 }

@@ -62,6 +62,7 @@ pub enum PageCmd {
 pub struct AddArgs {
     /// Page id KEY:slug: the project's KEY and a slug of a-z 0-9 - (e.g. APM:storage)
     pub page: String,
+    /// What the page is about, one line (e.g. "Storage: SQLite, WAL"); search weighs it most
     pub title: String,
     /// One line, at most 200 characters: the gist, shown in `apm context` (detail goes in
     /// the body)
@@ -86,6 +87,7 @@ pub struct AddArgs {
 pub struct EditArgs {
     /// Page id KEY:slug, e.g. APM:storage
     pub page: String,
+    /// New title, one line (a content change: makes a new version)
     #[arg(long)]
     pub title: Option<String>,
     /// New summary: one line, at most 200 characters ("" clears it)
@@ -124,7 +126,8 @@ pub struct EditArgs {
 
 #[derive(Args, Debug)]
 pub struct ListArgs {
-    #[arg(short, long)]
+    /// Only pages of project KEY
+    #[arg(short, long, value_name = "KEY")]
     pub project: Option<String>,
     /// Only pages linked to task KEY-N
     #[arg(long, value_name = "KEY-N")]
@@ -139,12 +142,15 @@ pub struct ListArgs {
 
 #[derive(Args, Debug)]
 pub struct SearchArgs {
-    /// Words to find (all must match, in any order; case and accents are ignored)
+    /// Words to find: every word must match, in any order; case and accents are ignored.
+    /// OR, NOT, `*`, quotes and `-` are plain text, not operators. Punctuation inside a word
+    /// keeps its parts together (busy_timeout finds "busy timeout", not "timeout ... busy")
     #[arg(allow_hyphen_values = true)]
     pub query: String,
-    #[arg(short, long)]
+    /// Only pages and task log entries of project KEY
+    #[arg(short, long, value_name = "KEY")]
     pub project: Option<String>,
-    /// At most N results
+    /// At most N results in total (pages first, then log entries)
     #[arg(long, value_name = "N", default_value_t = 10,
           value_parser = clap::value_parser!(u32).range(1..=100))]
     pub limit: u32,
@@ -182,7 +188,8 @@ pub struct PageSummary {
     /// The summary, or without one the body's first line (cut at 120 characters + `...`)
     pub summary: String,
     pub pinned: bool,
-    /// Linked to the task (or one of its parents); only in `apm context`
+    /// Linked to the task (or one of its parents); only in `apm context` (false for
+    /// `apm context -p`)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub linked: Option<bool>,
     pub version: i64,
@@ -297,13 +304,20 @@ pub fn get(conn: &Connection, id: i64) -> Result<Page> {
     Ok(page)
 }
 
-/// A title is required and one line.
-fn check_title(title: &str) -> Result<()> {
-    if title.trim().is_empty() {
-        return Err(err("title cannot be empty"));
+/// The rules every page's content follows, wherever it comes from (add, edit, import): a
+/// non-empty one-line title and a one-line summary of at most 200 characters. Pass None for
+/// a part that is not being set.
+pub fn check_content(title: Option<&str>, summary: Option<&str>) -> Result<()> {
+    if let Some(t) = title {
+        if t.trim().is_empty() {
+            return Err(err("title cannot be empty"));
+        }
+        if t.contains(['\n', '\r']) {
+            return Err(err("title must be one line"));
+        }
     }
-    if title.contains(['\n', '\r']) {
-        return Err(err("title must be one line"));
+    if let Some(s) = summary {
+        check_summary(s)?;
     }
     Ok(())
 }
@@ -334,7 +348,7 @@ fn link(conn: &Connection, actor: &str, page_id: i64, page: &str, item_id: i64) 
         params![page_id, item_id],
     )? > 0;
     if added {
-        touch_task(conn, actor, item_id, EventKind::Paged, page)?;
+        touch_task(conn, actor, item_id, EventKind::Paged, (None, Some(page)))?;
     }
     Ok(added)
 }
@@ -346,23 +360,20 @@ fn unlink(conn: &Connection, actor: &str, page_id: i64, page: &str, item_id: i64
         params![page_id, item_id],
     )? > 0;
     if removed {
-        touch_task(conn, actor, item_id, EventKind::Unpaged, page)?;
+        touch_task(conn, actor, item_id, EventKind::Unpaged, (Some(page), None))?;
     }
     Ok(removed)
 }
 
-/// Record `paged` (new = page id) or `unpaged` (old = page id) on a task and bump it.
+/// Record a page event on a task (`paged`: new = page id; `unpaged`: old = page id) and
+/// bump the task's `updated_at`.
 fn touch_task(
     conn: &Connection,
     actor: &str,
     item_id: i64,
     kind: EventKind,
-    page: &str,
+    (old, new): (Option<&str>, Option<&str>),
 ) -> Result<()> {
-    let (old, new) = match kind {
-        EventKind::Paged => (None, Some(page)),
-        _ => (Some(page), None),
-    };
     db::record_event(conn, item_id, actor, kind, None, old, new)?;
     conn.execute(
         &format!(
@@ -388,9 +399,8 @@ fn tasks(conn: &Connection, refs: &[String]) -> Result<Vec<i64>> {
 
 fn add(ctx: &Ctx, args: AddArgs) -> Result<()> {
     let (key, slug) = db::parse_page_ref(&args.page)?;
-    check_title(&args.title)?;
     let summary = args.summary.unwrap_or_default();
-    check_summary(&summary)?;
+    check_content(Some(&args.title), Some(&summary))?;
     let body = input::read_text(args.body, args.body_file.as_deref(), &input::PAGE_BODY)?
         .unwrap_or_default();
     let tx = db::write_tx(&ctx.conn)?;
@@ -511,12 +521,7 @@ fn edit(ctx: &Ctx, mut args: EditArgs) -> Result<()> {
              --link or --unlink",
         ));
     }
-    if let Some(t) = &args.title {
-        check_title(t)?;
-    }
-    if let Some(s) = &args.summary {
-        check_summary(s)?;
-    }
+    check_content(args.title.as_deref(), args.summary.as_deref())?;
     let slug = args.rename.as_deref().map(db::check_slug).transpose()?;
     args.body = input::read_text(
         args.body.take(),
@@ -768,13 +773,15 @@ fn rm(ctx: &Ctx, reference: &str) -> Result<()> {
     output::written(ctx.json, &page, &format!("deleted {}", page.id))
 }
 
-/// User text as an FTS5 query that cannot be a syntax error: every word (a run of letters
-/// and digits) becomes a quoted string, all must match. None when there is no word.
+/// User text as an FTS5 query that cannot be a syntax error: every whitespace-separated
+/// token becomes a quoted phrase (`"` doubled), all must match, so operators are plain words
+/// and `busy_timeout` matches the words busy and timeout side by side. Tokens without a letter
+/// or digit are dropped; None when nothing is left.
 fn fts_query(text: &str) -> Option<String> {
     let words: Vec<String> = text
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .map(|w| format!("\"{w}\""))
+        .split_whitespace()
+        .filter(|w| w.chars().any(char::is_alphanumeric))
+        .map(|w| format!("\"{}\"", w.replace('"', "\"\"")))
         .collect();
     (!words.is_empty()).then(|| words.join(" "))
 }
@@ -784,8 +791,9 @@ fn one_line(s: String) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// `apm search QUERY`: pages and task log entries, best match first (bm25; a page's title
-/// weighs more than its summary, which weighs more than its body).
+/// `apm search QUERY`: matching pages first, then matching task log entries, each best match
+/// first by its own bm25 (a page's title weighs more than its summary, which weighs more than
+/// its body); `--limit` counts both.
 pub fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
     let conn = &ctx.conn;
     let project = args
@@ -794,54 +802,45 @@ pub fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
         .map(|k| db::project_id(conn, k))
         .transpose()?;
     let limit = i64::from(args.limit);
-    let mut hits: Vec<(f64, Hit)> = Vec::new();
+    let mut hits: Vec<Hit> = Vec::new();
     if let Some(query) = fts_query(&args.query) {
         let mut stmt = conn.prepare(
-            "SELECT bm25(pages_fts, 10.0, 5.0, 1.0), pr.key || ':' || p.slug, p.title,
+            "SELECT pr.key || ':' || p.slug, p.title,
                     snippet(pages_fts, -1, '[', ']', '...', 12)
              FROM pages_fts JOIN pages p ON p.id = pages_fts.rowid
              JOIN projects pr ON pr.id = p.project_id
              WHERE pages_fts MATCH ?1 AND (?2 IS NULL OR p.project_id = ?2)
-             ORDER BY 1 LIMIT ?3",
+             ORDER BY bm25(pages_fts, 10.0, 5.0, 1.0), p.id LIMIT ?3",
         )?;
         let rows = stmt.query_map(params![query, project, limit], |r| {
-            Ok((
-                r.get(0)?,
-                Hit::Page {
-                    id: r.get(1)?,
-                    title: r.get(2)?,
-                    snippet: one_line(r.get(3)?),
-                },
-            ))
+            Ok(Hit::Page {
+                id: r.get(0)?,
+                title: r.get(1)?,
+                snippet: one_line(r.get(2)?),
+            })
         })?;
         hits.extend(rows.collect::<rusqlite::Result<Vec<_>>>()?);
+        let rest = limit - hits.len() as i64;
         let mut stmt = conn.prepare(
-            "SELECT bm25(comments_fts), pr.key || '-' || i.seq, c.id, c.kind, c.author,
+            "SELECT pr.key || '-' || i.seq, c.id, c.kind, c.author,
                     c.created_at, snippet(comments_fts, 0, '[', ']', '...', 12)
              FROM comments_fts JOIN comments c ON c.id = comments_fts.rowid
              JOIN items i ON i.id = c.item_id JOIN projects pr ON pr.id = i.project_id
              WHERE comments_fts MATCH ?1 AND (?2 IS NULL OR i.project_id = ?2)
-             ORDER BY 1 LIMIT ?3",
+             ORDER BY bm25(comments_fts), c.id LIMIT ?3",
         )?;
-        let rows = stmt.query_map(params![query, project, limit], |r| {
-            Ok((
-                r.get(0)?,
-                Hit::Log {
-                    task: r.get(1)?,
-                    comment: r.get(2)?,
-                    entry: r.get(3)?,
-                    author: r.get(4)?,
-                    created_at: r.get(5)?,
-                    snippet: one_line(r.get(6)?),
-                },
-            ))
+        let rows = stmt.query_map(params![query, project, rest], |r| {
+            Ok(Hit::Log {
+                task: r.get(0)?,
+                comment: r.get(1)?,
+                entry: r.get(2)?,
+                author: r.get(3)?,
+                created_at: r.get(4)?,
+                snippet: one_line(r.get(5)?),
+            })
         })?;
         hits.extend(rows.collect::<rusqlite::Result<Vec<_>>>()?);
     }
-    // bm25: lower is better. Ties keep pages first.
-    hits.sort_by(|a, b| a.0.total_cmp(&b.0));
-    hits.truncate(args.limit as usize);
-    let hits: Vec<Hit> = hits.into_iter().map(|(_, h)| h).collect();
     if ctx.json {
         return output::json(&hits);
     }
@@ -921,7 +920,10 @@ pub fn for_context(conn: &Connection, item_id: i64) -> Result<(Vec<PageSummary>,
 /// pages it has.
 #[allow(dead_code)] // `apm context -p` (S4)
 pub fn for_project(conn: &Connection, project_id: i64) -> Result<(Vec<PageSummary>, i64)> {
-    let pages = summaries(conn, "p.project_id = ?1 AND p.pinned", &[&project_id])?;
+    let mut pages = summaries(conn, "p.project_id = ?1 AND p.pinned", &[&project_id])?;
+    for p in &mut pages {
+        p.linked = Some(false);
+    }
     let all: i64 = conn.query_row(
         "SELECT count(*) FROM pages WHERE project_id = ?1",
         params![project_id],
@@ -943,12 +945,12 @@ mod tests {
         );
         assert_eq!(
             fts_query("\"x\" OR y* (z) -w a:b NEAR").as_deref(),
-            Some("\"x\" \"OR\" \"y\" \"z\" \"w\" \"a\" \"b\" \"NEAR\"")
+            Some("\"\"\"x\"\"\" \"OR\" \"y*\" \"(z)\" \"-w\" \"a:b\" \"NEAR\"")
         );
         assert_eq!(fts_query("caf\u{e9}").as_deref(), Some("\"caf\u{e9}\""));
         assert_eq!(
             fts_query("busy_timeout").as_deref(),
-            Some("\"busy\" \"timeout\"")
+            Some("\"busy_timeout\"")
         );
         assert_eq!(fts_query(" \" - : * ( "), None);
         assert_eq!(fts_query(""), None);
@@ -1036,7 +1038,10 @@ mod tests {
         );
         assert_eq!(more, 3);
         let (pages, more) = for_project(&conn, 1).unwrap();
-        assert_eq!(ids(&pages), [("APM:arch", None), ("APM:conv", None)]);
+        assert_eq!(
+            ids(&pages),
+            [("APM:arch", Some(false)), ("APM:conv", Some(false))]
+        );
         assert_eq!(more, 3);
         let (pages, more) = for_project(&conn, 2).unwrap();
         assert!(pages.is_empty());

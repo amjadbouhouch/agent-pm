@@ -70,6 +70,11 @@ scripts/           version-updater.cjs for commit-and-tag-version
   transaction (`db::write_tx`), one per real change (diff before/after, no-ops record
   nothing). Pick an `EventKind`; a new kind is appended to the enum with a doc comment saying
   what `field`/`old`/`new` hold (import accepts exactly the enum's kinds). Values are stored as displayed (status name, KEY-N).
+- Pages (`cmd/page.rs`) are the two exceptions to the rules above. Their `updated_at`/`updated_by`
+  track content versions only (title, summary, body; always the current `page_versions` row):
+  pin, rename and task links don't touch them, and `verified_at`/`verified_by` record re-reads
+  (`stale` = neither for 30 days). Page slugs have no aliases: a rename breaks the old `KEY:slug`
+  (task events keep the old id as recorded). Content rules for every writer: `page::check_content`.
 - Text matching: SQLite's `lower`/`LIKE` fold ASCII only; use the `fold(text)` SQL function
   (registered in `db.rs`) for case-insensitive matching of user text.
 - Text output is ASCII (`->`, `...`); user data is printed as given.

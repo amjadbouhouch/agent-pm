@@ -94,7 +94,7 @@ pub enum Command {
     /// Pages: knowledge that outlives a task (decisions + why, architecture, conventions)
     #[command(subcommand)]
     Page(page::PageCmd),
-    /// Find pages and task log entries by words, best match first
+    /// Find pages, then task log entries, by words (each best match first)
     Search(page::SearchArgs),
     /// Link two tasks: A blocks|relates|duplicates B
     Link(link::LinkArgs),
