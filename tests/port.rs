@@ -172,7 +172,7 @@ fn round_trip_is_identical() {
     let src = Env::new();
     rich(&src);
     let first = export(&src, &[]);
-    assert_eq!(first["apm_export"], 1);
+    assert_eq!(first["apm_export"], 2);
     let keys: Vec<&str> = first["projects"]
         .as_array()
         .unwrap()
@@ -340,7 +340,10 @@ fn import_under_a_new_key() {
         ),
         "{line}"
     );
-    assert!(line.ends_with(" events\nimported 3 links\n"), "{line}");
+    assert!(
+        line.ends_with(" events, 0 pages (0 versions)\nimported 3 links, 0 page links\n"),
+        "{line}"
+    );
 
     let all = src.apm().args(["export"]).assert().success();
     let file = write(
@@ -455,11 +458,11 @@ fn dry_run_writes_nothing() {
         lines[0],
         format!(
             "would import APM: 4 tasks, 6 statuses, 2 milestones, 6 attributes, 3 comments, \
-             {events} events"
+             {events} events, 0 pages (0 versions)"
         )
     );
     assert!(lines[1].starts_with("would import OPS: 2 tasks, 5 statuses, 0 milestones, "));
-    assert_eq!(lines[2], "would import 5 links");
+    assert_eq!(lines[2], "would import 5 links, 0 page links");
     assert!(project_keys(&dst).is_empty());
 }
 
@@ -525,8 +528,8 @@ fn import_rejects_broken_files() {
     assert!(err_for("[1, 2]").contains("not an apm export"));
     let cases: Vec<(&Breaker, &str)> = vec![
         (
-            &|v| v["apm_export"] = 2.into(),
-            "unsupported export version 2",
+            &|v| v["apm_export"] = 3.into(),
+            "unsupported export version 3; this apm reads 1 to 2",
         ),
         (
             &|v| v["projects"][0]["tasks"][0]["status"] = "nope".into(),
@@ -771,4 +774,585 @@ fn backup_keep_prunes_old_backups_only() {
         .assert()
         .code(2);
     env.apm().args(["backup", "--keep", "0"]).assert().code(2);
+}
+
+// ---- apm_export 2: log kinds, pages, page links ----
+
+/// Pages with versions, inserted by SQL (as `apm page` stores them): `KEY:slug` ->
+/// (pinned, verified, versions as (title, summary, body, author, at)); the last version is
+/// the page's content.
+type PageRow<'a> = (&'a str, bool, bool, &'a [Version<'a>]);
+type Version<'a> = (&'a str, &'a str, &'a str, &'a str, &'a str);
+
+fn add_pages(env: &Env, pages: &[PageRow], links: &[(&str, &str)]) {
+    let conn = env.conn();
+    for (id, pinned, verified, versions) in pages {
+        let (key, slug) = id.split_once(':').unwrap();
+        let first = versions[0];
+        let last = versions[versions.len() - 1];
+        conn.execute(
+            "INSERT INTO pages (project_id, slug, title, summary, body, pinned, version,
+                                created_by, created_at, updated_by, updated_at, verified_by,
+                                verified_at)
+             SELECT id, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
+             FROM projects WHERE key = ?1",
+            rusqlite::params![
+                key,
+                slug,
+                last.0,
+                last.1,
+                last.2,
+                pinned,
+                versions.len() as i64,
+                first.3,
+                first.4,
+                last.3,
+                last.4,
+                verified.then_some("carol"),
+                verified.then_some("2026-10-30T09:00:00Z"),
+            ],
+        )
+        .unwrap();
+        let page_id = conn.last_insert_rowid();
+        for (n, (title, summary, body, author, at)) in versions.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO page_versions (page_id, version, title, summary, body, author, at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![page_id, n as i64 + 1, title, summary, body, author, at],
+            )
+            .unwrap();
+        }
+    }
+    for (page, task) in links {
+        let (key, slug) = page.split_once(':').unwrap();
+        let (tkey, seq) = task.split_once('-').unwrap();
+        conn.execute(
+            "INSERT INTO page_links (page_id, item_id)
+             SELECT pg.id, i.id FROM pages pg, items i
+             JOIN projects p ON p.id = pg.project_id
+             JOIN projects q ON q.id = i.project_id
+             WHERE p.key = ?1 AND pg.slug = ?2 AND q.key = ?3 AND i.seq = ?4",
+            rusqlite::params![key, slug, tkey, seq.parse::<i64>().unwrap()],
+        )
+        .unwrap();
+    }
+}
+
+/// On top of `rich`: every log kind on OPS-2 (the last task, so comment ids match after an
+/// import) and pages in both projects, one with three versions, linked across projects.
+fn knowledge(env: &Env) {
+    let q =
+        env.json(&["comment", "OPS-2", "--kind", "question", "which region?"])["id"].to_string();
+    run_all(
+        env,
+        &[
+            &["comment", "OPS-2", "a note in between"],
+            &["comment", "OPS-2", "--answer", &q, "eu-west"],
+            &[
+                "comment",
+                "OPS-2",
+                "--kind",
+                "handoff",
+                "State: done\nNext: deploy",
+            ],
+        ],
+    );
+    add_pages(
+        env,
+        &[
+            (
+                "APM:storage",
+                true,
+                true,
+                &[
+                    ("Store", "", "v1 body", "alice", "2026-10-01T10:00:00Z"),
+                    (
+                        "Storage",
+                        "SQLite",
+                        "v2 body",
+                        "bob",
+                        "2026-10-02T10:00:00Z",
+                    ),
+                    (
+                        "Storage",
+                        "SQLite file, WAL, one writer per tx",
+                        "rollback journal on network drives",
+                        "bob",
+                        "2026-10-03T10:00:00Z",
+                    ),
+                ],
+            ),
+            (
+                "APM:conventions",
+                false,
+                false,
+                &[("Conventions", "", "", "alice", "2026-10-01T09:00:00Z")],
+            ),
+            (
+                "OPS:runbook",
+                false,
+                false,
+                &[(
+                    "Runbook",
+                    "how to deploy",
+                    "steps",
+                    "dave",
+                    "2026-10-05T09:00:00Z",
+                )],
+            ),
+        ],
+        &[
+            ("OPS:runbook", "APM-2"),
+            ("APM:storage", "OPS-3"),
+            ("APM:storage", "APM-1"),
+        ],
+    );
+}
+
+/// `apm export` stdout as text.
+fn export_text(env: &Env, args: &[&str]) -> String {
+    let out = env.apm().arg("export").args(args).assert().success();
+    String::from_utf8(out.get_output().stdout.clone()).unwrap()
+}
+
+/// An export's text with the `exported_at` line taken out.
+fn without_time_line(text: &str) -> String {
+    text.lines()
+        .filter(|l| !l.trim_start().starts_with("\"exported_at\""))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn count(env: &Env, sql: &str) -> i64 {
+    env.conn().query_row(sql, [], |r| r.get(0)).unwrap()
+}
+
+#[test]
+fn round_trip_keeps_pages_and_log_kinds() {
+    let src = Env::new();
+    rich(&src);
+    knowledge(&src);
+    let first = export(&src, &[]);
+    let ops2 = &first["projects"][1]["tasks"][0];
+    assert_eq!(ops2["id"], "OPS-2");
+    assert_eq!(
+        ops2["comments"][2],
+        serde_json::json!({
+            "author": "tester", "kind": "answer", "answers": 1,
+            "body": "eu-west", "created_at": ops2["comments"][2]["created_at"]
+        })
+    );
+    let kinds: Vec<&str> = ops2["comments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["question", "note", "answer", "handoff"]);
+    // Pages by slug, after the attributes; versions by number; page links after links.
+    let text = export_text(&src, &[]);
+    let pos = |field: &str| text.find(&format!("\"{field}\": ")).unwrap();
+    assert!(pos("attributes") < pos("pages") && pos("pages") < pos("tasks"));
+    assert!(text.rfind("\"links\": ").unwrap() < pos("page_links"));
+    assert!(text.contains(
+        r#""kind": "answer",
+              "answers": 1,
+              "body": "eu-west","#
+    ));
+    let storage = &first["projects"][0]["pages"][1];
+    assert_eq!(first["projects"][0]["pages"][0]["slug"], "conventions");
+    assert_eq!(storage["slug"], "storage");
+    assert_eq!(storage["pinned"], true);
+    assert_eq!(storage["version"], 3);
+    assert_eq!(storage["verified_by"], "carol");
+    assert_eq!(storage["versions"].as_array().unwrap().len(), 3);
+    assert_eq!(storage["versions"][0]["title"], "Store");
+    assert_eq!(
+        first["page_links"],
+        serde_json::json!([
+            {"page": "APM:storage", "task": "APM-1"},
+            {"page": "APM:storage", "task": "OPS-3"},
+            {"page": "OPS:runbook", "task": "APM-2"},
+        ])
+    );
+
+    let file = write(&src, "export.json", &text);
+    let dst = Env::new();
+    let res = dst.json(&["import", &file]);
+    assert_eq!(res["page_links"], 3);
+    assert_eq!(res["projects"][0]["pages"], 2);
+    assert_eq!(res["projects"][0]["page_versions"], 4);
+    // Byte-identical, but for exported_at.
+    assert_eq!(
+        without_time_line(&export_text(&dst, &[])),
+        without_time_line(&text)
+    );
+    // The answer points at the question's new id.
+    assert_eq!(src.json(&["show", "OPS-2"]), dst.json(&["show", "OPS-2"]));
+    let comments = dst.json(&["show", "OPS-2"])["comments"].clone();
+    assert_eq!(comments[2]["answers"], comments[0]["id"]);
+    // The FTS triggers indexed the imported pages and log entries.
+    let hits = |sql: &str| count(&dst, sql);
+    assert_eq!(
+        hits("SELECT count(*) FROM pages_fts WHERE pages_fts MATCH '\"rollback\" \"journal\"'"),
+        1
+    );
+    assert_eq!(
+        hits("SELECT count(*) FROM pages_fts WHERE pages_fts MATCH 'deploy'"),
+        1
+    );
+    assert_eq!(
+        hits("SELECT count(*) FROM comments_fts WHERE comments_fts MATCH 'region'"),
+        1
+    );
+}
+
+/// What apm 0.3.0 exported (`apm_export` 1): comments without kinds, no pages.
+const V1_FILE: &str = r#"{
+  "apm_export": 1,
+  "exported_at": "2026-10-31T19:47:54Z",
+  "projects": [
+    {
+      "key": "APM", "name": "agent-pm", "description": "v1 fixture", "next_seq": 3,
+      "created_at": "2026-10-31T19:47:54Z", "updated_at": "2026-10-31T19:47:54Z",
+      "statuses": [
+        {"name": "todo", "category": "todo"}, {"name": "doing", "category": "active"},
+        {"name": "blocked", "category": "active"}, {"name": "done", "category": "done"},
+        {"name": "cancelled", "category": "cancelled"}
+      ],
+      "milestones": [],
+      "attributes": [],
+      "tasks": [
+        {
+          "id": "APM-1", "parent": null, "title": "first task", "body": "body",
+          "status": "todo", "priority": "none", "assignee": null, "due": null,
+          "milestone": null, "created_by": "alice", "created_at": "2026-10-31T19:47:54Z",
+          "updated_at": "2026-10-31T19:47:54Z", "values": {}, "tags": ["wip"],
+          "comments": [
+            {"author": "alice", "body": "a plain note", "created_at": "2026-10-31T19:47:54Z"},
+            {"author": "alice", "body": "another", "created_at": "2026-10-31T19:47:54Z"}
+          ],
+          "events": [
+            {"actor": "alice", "at": "2026-10-31T19:47:54Z", "kind": "created", "field": null,
+             "old": null, "new": "first task"},
+            {"actor": "alice", "at": "2026-10-31T19:47:54Z", "kind": "commented",
+             "field": null, "old": null, "new": "a plain note"},
+            {"actor": "alice", "at": "2026-10-31T19:47:54Z", "kind": "linked",
+             "field": "blocks", "old": null, "new": "APM-2"}
+          ]
+        },
+        {
+          "id": "APM-2", "parent": "APM-1", "title": "second", "body": "", "status": "todo",
+          "priority": "none", "assignee": null, "due": null, "milestone": null,
+          "created_by": "alice", "created_at": "2026-10-31T19:47:54Z",
+          "updated_at": "2026-10-31T19:47:54Z", "values": {}, "tags": [], "comments": [],
+          "events": []
+        }
+      ]
+    }
+  ],
+  "links": [{"from": "APM-1", "kind": "blocks", "to": "APM-2"}]
+}"#;
+
+#[test]
+fn v1_file_still_imports() {
+    let dst = Env::new();
+    let res = dst.json(&["import", &write(&dst, "v1.json", V1_FILE)]);
+    assert_eq!(res["projects"][0]["comments"], 2);
+    assert_eq!(res["projects"][0]["pages"], 0);
+    assert_eq!(res["page_links"], 0);
+    let comments = dst.json(&["show", "APM-1"])["comments"].clone();
+    for c in comments.as_array().unwrap() {
+        assert_eq!(c["kind"], "note");
+        assert_eq!(c["answers"], Value::Null);
+    }
+    assert_eq!(comments[0]["body"], "a plain note");
+    assert_eq!(dst.json(&["show", "APM-2"])["parent"], "APM-1");
+    let v = export(&dst, &[]);
+    assert_eq!(v["apm_export"], 2);
+    assert_eq!(v["projects"][0]["pages"], serde_json::json!([]));
+    assert_eq!(v["page_links"], serde_json::json!([]));
+    assert_eq!(v["links"].as_array().unwrap().len(), 1);
+
+    // A version 1 file has none of the version 2 fields.
+    let v1: Value = serde_json::from_str(V1_FILE).unwrap();
+    let other = Env::new();
+    let err_with = |f: &dyn Fn(&mut Value)| {
+        let mut v = v1.clone();
+        f(&mut v);
+        other.json_err(&["import", &write(&other, "bad.json", &v.to_string())])
+    };
+    let cases: Vec<(&Breaker, &str)> = vec![
+        (
+            &|v| v["projects"][0]["tasks"][0]["comments"][0]["kind"] = "handoff".into(),
+            "unknown field `kind` in apm_export 1",
+        ),
+        (
+            &|v| v["projects"][0]["tasks"][0]["comments"][0]["answers"] = Value::Null,
+            "unknown field `answers` in apm_export 1",
+        ),
+        (
+            &|v| v["projects"][0]["pages"] = serde_json::json!([]),
+            "unknown field `pages` in apm_export 1",
+        ),
+        (
+            &|v| v["page_links"] = serde_json::json!([]),
+            "unknown field `page_links` in apm_export 1",
+        ),
+        (
+            &|v| v["projects"][0]["tasks"][0]["comments"][0]["mood"] = "ok".into(),
+            "unknown field `mood`",
+        ),
+    ];
+    for (f, want) in cases {
+        let e = err_with(f);
+        assert!(e.contains(want), "want `{want}`, got `{e}`");
+    }
+    assert!(project_keys(&other).is_empty());
+}
+
+/// `small` plus a question, its answer and a handoff on APM-1, and a page with two
+/// versions linked to APM-2.
+fn small_knowledge(env: &Env) -> Value {
+    small(env);
+    let q = env.json(&["comment", "APM-1", "--kind", "question", "why?"])["id"].to_string();
+    run_all(
+        env,
+        &[
+            &["comment", "APM-1", "--answer", &q, "because"],
+            &["comment", "APM-1", "--kind", "handoff", "next: ship"],
+        ],
+    );
+    add_pages(
+        env,
+        &[(
+            "APM:notes",
+            false,
+            false,
+            &[
+                ("Notes", "", "one", "alice", "2026-10-01T10:00:00Z"),
+                ("Notes", "short", "two", "bob", "2026-10-02T10:00:00Z"),
+            ],
+        )],
+        &[("APM:notes", "APM-2")],
+    );
+    export(env, &[])
+}
+
+fn page(v: &mut Value) -> &mut Value {
+    &mut v["projects"][0]["pages"][0]
+}
+
+fn comments(v: &mut Value) -> &mut Value {
+    &mut v["projects"][0]["tasks"][0]["comments"]
+}
+
+#[test]
+fn import_rejects_broken_pages_and_answers() {
+    let env = Env::new();
+    let good = small_knowledge(&env);
+    let dst = Env::new();
+    let err_with = |f: &dyn Fn(&mut Value)| {
+        let mut v = good.clone();
+        f(&mut v);
+        dst.json_err(&["import", &write(&dst, "bad.json", &v.to_string())])
+    };
+    let cases: Vec<(&Breaker, &str)> = vec![
+        (
+            &|v| page(v)["slug"] = "my notes".into(),
+            "page APM:my notes: invalid page slug `my notes`",
+        ),
+        (
+            &|v| page(v)["slug"] = "Notes".into(),
+            "page APM:Notes: page slug must be lowercase: Notes",
+        ),
+        (
+            &|v| {
+                let s = "x".repeat(201);
+                page(v)["summary"] = s.clone().into();
+                page(v)["versions"][1]["summary"] = s.into();
+            },
+            "page APM:notes: summary is 201 characters, the limit is 200",
+        ),
+        (
+            &|v| page(v)["versions"][0]["summary"] = "y".repeat(201).into(),
+            "page APM:notes: version 1: summary is 201 characters",
+        ),
+        (
+            &|v| page(v)["title"] = " ".into(),
+            "page APM:notes: title cannot be empty",
+        ),
+        (
+            &|v| {
+                let p = page(v)["versions"].as_array_mut().unwrap();
+                p.remove(0);
+            },
+            "page APM:notes: versions must run 1 to 2 in order: expected version 1, found 2",
+        ),
+        (
+            &|v| page(v)["versions"][1]["version"] = 3.into(),
+            "page APM:notes: versions must run 1 to 2 in order: expected version 2, found 3",
+        ),
+        (
+            &|v| page(v)["version"] = 3.into(),
+            "page APM:notes: versions must run 1 to 3: the file has 2",
+        ),
+        (
+            &|v| page(v)["versions"] = serde_json::json!([]),
+            "page APM:notes: versions must run 1 to 2: the file has 0",
+        ),
+        (
+            &|v| page(v)["body"] = "edited without a version".into(),
+            "page APM:notes: version 2 differs from the page's title, summary or body",
+        ),
+        (
+            &|v| page(v)["verified_at"] = "2026-10-03T10:00:00Z".into(),
+            "verified_by and verified_at go together",
+        ),
+        (
+            &|v| page(v)["versions"][0]["at"] = "monday".into(),
+            "page APM:notes: version 1: invalid timestamp",
+        ),
+        (
+            &|v| page(v)["pinned"] = 1.into(),
+            "invalid type: integer `1`, expected a boolean",
+        ),
+        (&|v| page(v)["owner"] = "x".into(), "unknown field `owner`"),
+        (
+            &|v| {
+                let p = page(v).clone();
+                v["projects"][0]["pages"].as_array_mut().unwrap().push(p);
+            },
+            "project APM: page appears twice: APM:notes",
+        ),
+        (
+            &|v| v["page_links"][0]["page"] = "APM:nope".into(),
+            "page link APM:nope APM-2: no such page in the file: APM:nope",
+        ),
+        (
+            &|v| v["page_links"][0]["task"] = "APM-9".into(),
+            "page link APM:notes APM-9: no such task in the file: APM-9",
+        ),
+        (
+            &|v| {
+                let l = v["page_links"][0].clone();
+                v["page_links"].as_array_mut().unwrap().push(l);
+            },
+            "page link APM:notes APM-2: appears twice",
+        ),
+        // Comments of APM-1: 1 question, 2 answer (answers 1), 3 handoff.
+        (
+            &|v| comments(v)[1]["answers"] = 2.into(),
+            "APM-1: comment 2 answers comment 2, which is not an earlier comment of this task",
+        ),
+        (
+            &|v| comments(v)[1]["answers"] = 3.into(),
+            "APM-1: comment 2 answers comment 3, which is not an earlier comment",
+        ),
+        (
+            &|v| comments(v)[1]["answers"] = 0.into(),
+            "APM-1: comment 2 answers comment 0",
+        ),
+        (
+            &|v| {
+                comments(v)[0]["kind"] = "note".into();
+            },
+            "APM-1: comment 2 answers comment 1, which is a note, not a question",
+        ),
+        (
+            &|v| comments(v)[2]["answers"] = 1.into(),
+            "APM-1: comment 3 is a handoff, only an answer has `answers`",
+        ),
+        (
+            &|v| comments(v)[0]["kind"] = "rant".into(),
+            "unknown variant `rant`",
+        ),
+        (
+            &|v| {
+                comments(v)[0].as_object_mut().unwrap().remove("kind");
+            },
+            "missing field `kind`",
+        ),
+        (
+            &|v| {
+                v.as_object_mut().unwrap().remove("page_links");
+            },
+            "missing field `page_links`",
+        ),
+    ];
+    for (f, want) in cases {
+        let e = err_with(f);
+        assert!(e.contains(want), "want `{want}`, got `{e}`");
+    }
+    // Nothing was written.
+    assert!(project_keys(&dst).is_empty());
+    for table in ["pages", "page_versions", "page_links", "comments"] {
+        assert_eq!(
+            count(&dst, &format!("SELECT count(*) FROM {table}")),
+            0,
+            "{table}"
+        );
+    }
+    // The good file still imports.
+    let res = dst.json(&["import", &write(&dst, "good.json", &good.to_string())]);
+    assert_eq!(res["projects"][0]["pages"], 1);
+}
+
+#[test]
+fn import_under_a_new_key_rewrites_page_ids() {
+    let src = Env::new();
+    small_knowledge(&src);
+    let file = write(&src, "apm.json", &export_text(&src, &["-p", "APM"]));
+
+    // --dry-run counts pages and page links, and writes none.
+    let res = src.json(&["import", &file, "--key", "COPY", "--dry-run"]);
+    assert_eq!(res["projects"][0]["pages"], 1);
+    assert_eq!(res["projects"][0]["page_versions"], 2);
+    assert_eq!(res["page_links"], 1);
+    assert_eq!(count(&src, "SELECT count(*) FROM pages"), 1);
+    assert_eq!(count(&src, "SELECT count(*) FROM page_links"), 1);
+
+    let out = src
+        .apm()
+        .args(["import", &file, "--key", "COPY"])
+        .assert()
+        .success();
+    let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        text.ends_with(", 1 pages (2 versions)\nimported 1 links, 1 page links\n"),
+        "{text}"
+    );
+    let copy = export(&src, &["-p", "COPY"]);
+    assert_eq!(copy["projects"][0]["pages"][0]["slug"], "notes");
+    assert_eq!(
+        copy["page_links"],
+        serde_json::json!([{"page": "COPY:notes", "task": "COPY-2"}])
+    );
+    let comments = src.json(&["show", "COPY-1"])["comments"].clone();
+    assert_eq!(comments[1]["kind"], "answer");
+    assert_eq!(comments[1]["answers"], comments[0]["id"]);
+    // The original keeps its page and link.
+    assert_eq!(
+        export(&src, &["-p", "APM"])["page_links"],
+        serde_json::json!([{"page": "APM:notes", "task": "APM-2"}])
+    );
+}
+
+#[test]
+fn export_one_project_keeps_only_its_page_links() {
+    let env = Env::new();
+    rich(&env);
+    knowledge(&env);
+    // OPS:runbook -> APM-2 and APM:storage -> OPS-3 cross projects: exported only with both.
+    assert_eq!(
+        export(&env, &["-p", "APM"])["page_links"],
+        serde_json::json!([{"page": "APM:storage", "task": "APM-1"}])
+    );
+    let ops = export(&env, &["-p", "OPS"]);
+    assert_eq!(ops["page_links"], serde_json::json!([]));
+    assert_eq!(ops["projects"][0]["pages"][0]["slug"], "runbook");
+    let path = env.dir.path().join("out.json");
+    let res = env.json(&["export", "-o", path.to_str().unwrap()]);
+    assert_eq!(res["pages"], 3);
+    assert_eq!(res["page_links"], 3);
 }

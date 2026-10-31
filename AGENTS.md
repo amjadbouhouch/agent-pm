@@ -93,32 +93,48 @@ scripts/           version-updater.cjs for commit-and-tag-version
 ## Export format
 
 `apm export` writes, and `apm import` reads, this JSON (`cmd/port.rs`). It is a contract:
-any change to its shape bumps `apm_export` (and import keeps reading the old version). A
+any change to its shape bumps `apm_export` (and import keeps reading every old version). A
 schema change decides whether its new columns are exported; claims and aliases are not.
 Unknown fields are rejected. Field order is fixed, so the same data exports to the same text.
 
 ```
-{ "apm_export": 1, "exported_at": TIME,
+{ "apm_export": 2, "exported_at": TIME,
   "projects": [                                   by key
     { "key", "name", "description", "next_seq", "created_at", "updated_at",
       "statuses":   [{"name", "category"}],                         by position
       "milestones": [{"name", "description", "due"|null, "status", "created_at",
                       "updated_at"}],                               by creation
       "attributes": [{"name", "type", "options": [..], "created_at"}],  by creation
+      "pages": [{"slug", "title", "summary", "body", "pinned", "version", "created_by",
+                 "created_at", "updated_by", "updated_at", "verified_by"|null,
+                 "verified_at"|null,
+                 "versions": [{"version", "title", "summary", "body", "author", "at"}]}],
+                                                    by slug; versions 1..=version
       "tasks": [                                                    by number
         { "id": "KEY-N", "parent": "KEY-N"|null, "title", "body", "status" (name),
           "priority", "assignee"|null, "due"|null, "milestone" (name)|null,
           "created_by", "created_at", "updated_at",
           "values": {attribute name: stored text},                  by name
           "tags": [..],                                             sorted
-          "comments": [{"author", "body", "created_at"}],           oldest first
+          "comments": [{"author", "kind", "answers": N|null, "body", "created_at"}],
+                                                                    oldest first
           "events": [{"actor", "at", "kind", "field", "old", "new"}] } ] } ],  oldest first
-  "links": [{"from": "KEY-N", "kind", "to": "KEY-N"}] }  both ends exported; by from, kind, to
+  "links": [{"from": "KEY-N", "kind", "to": "KEY-N"}],  both ends exported; by from, kind, to
+  "page_links": [{"page": "KEY:slug", "task": "KEY-N"}] }  both ends exported; by page, task
 ```
 
-Values are as stored (`yes` is `"true"`, dates in UTC). Import re-validates everything as the
-commands would (event kinds must be known `EventKind`s), keeps `KEY-N`, timestamps and actors,
-and writes in one transaction; imported tasks start unclaimed.
+Values are as stored (`yes` is `"true"`, dates in UTC). A comment's `kind` is a
+`CommentKind`; an answer's `answers` is the 1-based position of its question in the same
+task's `comments` (files have no comment ids). A page's last version is its current content.
+Import re-validates everything as the commands would (event and comment kinds must be known,
+`answers` must point to an earlier question, slugs and summary length as `apm page` checks
+them, versions run 1 to `version` with no gap), keeps `KEY-N`, `KEY:slug`, timestamps and
+actors, and writes in one transaction (the FTS triggers index pages and comments); imported
+tasks start unclaimed. `--key NEW` renames the project's task and page ids alike.
+
+Import reads every version: 2 as above; 1 (apm 0.3.0 and before) has no comment `kind` or
+`answers`, no `pages` and no `page_links`: its comments import as notes, and those fields
+are rejected in a version 1 file.
 
 ## Workflow
 
