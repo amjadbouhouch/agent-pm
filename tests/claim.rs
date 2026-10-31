@@ -527,15 +527,16 @@ fn next_with_nothing_ready_exits_3() {
 }
 
 #[test]
-fn next_text_is_one_line() {
+fn next_text_is_the_claim_and_where_to_catch_up() {
     let env = env_tasks(1);
     let out = env.apm().args(["--as", "bot", "next"]).assert().success();
     let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
     assert!(
-        text.starts_with("claimed APM-1 until ") && text.ends_with(": t1\n"),
+        lines[0].starts_with("claimed APM-1 until ") && lines[0].ends_with(": t1"),
         "{text}"
     );
-    assert_eq!(text.lines().count(), 1);
+    assert_eq!(lines[1..], ["context: apm context APM-1"]);
 }
 
 /// The point of claims: agents racing on `next` never get the same task.
@@ -683,7 +684,8 @@ fn next_resumes_the_actors_own_claim_first() {
     let out = env.apm().args(["--as", "bot", "next"]).assert().success();
     let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     assert!(
-        text.starts_with("renewed APM-2 until ") && text.ends_with(": t2\n"),
+        text.starts_with("renewed APM-2 until ")
+            && text.ends_with(": t2\ncontext: apm context APM-2\n"),
         "{text}"
     );
     assert_eq!(as_(&env, "eve", &["next"])["task"]["id"], "APM-1");

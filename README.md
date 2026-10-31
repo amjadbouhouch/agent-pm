@@ -21,6 +21,9 @@ prints stable JSON, so agents can parse it; without it, output is short plain te
 - Links between tasks (`blocks`, `relates`, `duplicates`), with `list --ready` / `--blocked`
 - Tags, filtered with `list --tag`, counted with `apm tags`
 - Search (titles, bodies, comments), multi-key sort, limit
+- Shared memory for agents: a task log with handoffs, questions and answers; pages of
+  knowledge (`KEY:slug`) with versions; `apm context` gives a task's or project's story in
+  one call; `apm search` ranks pages and log entries
 - History: every change to a task, who made it and when
 - Export/import projects as JSON (same task ids and history), and one-command backups
 - Move tasks and re-key projects (old ids keep resolving); rename statuses, milestones and
@@ -109,6 +112,23 @@ the next agent. It prints `{"task": {...}, "renewed": false}`; when nothing is r
 task or `release` drops it early, `claim --steal` takes over someone else's, and
 `apm claims` lists the live ones.
 
+## Knowledge between agents
+
+Agents forget (new session, context compaction); apm remembers for them:
+
+```sh
+apm context APM-3 --json        # task, latest handoff, recent log, open questions, pages
+apm context -p APM --json       # fresh session: pinned pages, questions, in-flight handoffs
+apm comment APM-3 --kind question "Does WAL work on NFS?"
+apm comment APM-3 --answer 41 "No: rollback journal there"
+apm comment APM-3 --kind handoff - < handoff.md   # state, next, decisions + why, where
+apm page add APM:storage "Storage" -s "SQLite file, WAL" -b - --link APM-3 --pin
+apm search "busy timeout" -p APM
+apm guide --agents              # lines to paste into AGENTS.md / CLAUDE.md
+```
+
+Nothing is enforced: `context`, `next` and `done` print short hints instead.
+
 ## Commands
 
 | Command | What it does |
@@ -122,12 +142,15 @@ task or `release` drops it early, `claim --steal` takes over someone else's, and
 | `status list\|add\|edit\|rm` | Custom statuses per project |
 | `milestone add\|list\|show\|edit\|close\|reopen\|rm` | Milestones with progress |
 | `attr add\|edit\|list\|rm` | Custom attributes, set with `--set`, filtered with `--where` |
-| `comment KEY-N TEXT` | Comment on a task |
+| `comment KEY-N TEXT` | Log on a task; `--kind handoff\|question`, `--answer ID` |
+| `context [KEY-N]`, `context -p KEY` | What earlier agents learned, in one call; `next --context` |
+| `page add\|show\|edit\|verify\|list\|history\|rm` | Pages `KEY:slug`: versions, task links, pins, staleness |
+| `search TEXT` | Pages, then log entries, best match first |
 | `link\|unlink A KIND B` | Links between tasks, also across projects: `blocks` (no cycles), `relates`, `duplicates` |
 | `tags`, `add/edit --tag`, `edit --untag` | Lowercase tags and their counts |
 | `history KEY-N` | A task's change history, oldest first |
 | `export`, `import FILE\|-`, `backup [PATH]` | Projects as JSON, back in another database; a copy of the database |
-| `guide` | Compact usage guide for agents |
+| `guide` | Compact usage guide for agents; `--agents` prints an AGENTS.md snippet |
 | `db` | Database path and schema version |
 
 Run `apm guide` for the full workflow and the JSON contract, and `apm <command> --help`

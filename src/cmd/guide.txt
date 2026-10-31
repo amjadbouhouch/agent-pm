@@ -1,5 +1,6 @@
 apm: a small project tracker for agents and humans (projects, milestones, tasks, subtasks,
-assignees, comments, tags, links, history, custom statuses and attributes). One SQLite file.
+assignees, a task log, pages, tags, links, history, custom statuses and attributes) and
+the shared memory of the agents that use it. One SQLite file.
 
 SETUP
   Database: --db PATH > $APM_DB > ~/.agent-pm/apm.db (created on first use).
@@ -9,7 +10,8 @@ SETUP
 JSON CONTRACT (--json, works on every command)
   Success: one JSON object or array on stdout. Writes return the written object.
   Errors:  {"error": "<msg>"} on stderr. Exit 1 = command failed, 2 = invalid arguments.
-  `next` prints {"task": <task>|null, "renewed": bool}; no task ready = exit 3.
+  `next` prints {"task": <task>|null, "renewed": bool} (+ "context" with --context);
+  no task ready = exit 3.
   Without --json: short text lines, errors as `error: <msg>`. apm never prompts.
 
 IDS
@@ -67,7 +69,7 @@ MOVE AND RENAME (old task ids and project keys keep resolving)
   apm attr edit points -p APM --rename estimate
 
 EXPORT, IMPORT, BACKUP
-  apm export -p APM -o apm.json                      # versioned JSON; no -p = all projects
+  apm export -p APM -o apm.json                      # JSON, pages too; no -p = all projects
   apm import apm.json --key NEW --dry-run            # same KEY-N and history; all or nothing
   apm backup --keep 7                                # copy to backups/ next to the db
 
@@ -79,11 +81,28 @@ SEARCH, SORT, DUE
 
 AGENT LOOP (agents sharing a project each get their own task)
   apm add "release notes" -p APM --priority urgent
-  apm next -p APM --as bot                           # claim + assign + start the best ready task
+  apm next -p APM --context --as bot       # claim + assign + start the best task; its context
   apm comment APM-4 "draft in docs/notes.md" --as bot
   apm claim APM-4 --ttl 4h --as bot                  # renew (default 2h, max 7d)
   apm claims -p APM --mine --as bot                  # live claims, soonest expiry first
   apm done APM-4 --as bot                            # closing a task releases its claim
+
+KNOWLEDGE (what you learn, kept for the next agent and for you after compaction)
+  apm context APM-3                      # START HERE: task, handoff, log, questions, pages
+  apm context                            # the task you hold a claim on; next --context too
+  apm context -p APM                     # fresh session: pinned pages, questions, handoffs
+  apm comment APM-3 "lock is per file"   # log: a finding on this task (add-only)
+  apm comment APM-3 --kind question "WAL on NFS?"   # open until answered:
+  apm comment APM-3 --answer 41 "no, rollback journal"
+  apm comment APM-3 --kind handoff -     # before you stop: state, next, decisions + why, where
+  apm page add APM:storage "Storage" -s "gist in one line" -b - --link APM-3 [--pin]
+  apm page show APM:storage              # full text; --version N; page history APM:storage
+  apm page edit APM:storage --append -   # add a section; --expect-version N guards rewrites
+  apm page verify APM:storage            # re-read, still true (pages unchecked 30d are stale)
+  apm search "busy timeout" -p APM       # pages, then log entries, best match first
+  Log or page? Log = about this task, now. Page = stays true after the task closes
+  (decision + why, architecture, convention, gotcha). --pin: shown with every task of KEY.
+  apm guide --agents                     # lines to paste into AGENTS.md / CLAUDE.md
 
 VALUES
   Status:   a status of the task's project; JSON has `status` and `status_category`.
@@ -114,7 +133,10 @@ COMMANDS
   status list|add|edit|rm         custom statuses, -p KEY; a project keeps at least one
   milestone add|list|show|edit|close|reopen|rm   -p KEY; rm keeps its tasks
   attr add|edit|list|rm           custom attributes, -p KEY; edit --rename
-  comment KEY-N TEXT|-            add a comment (- reads stdin; --file PATH)
+  comment KEY-N TEXT|-            log entry (- reads stdin; --file); --kind --answer ID
+  context [KEY-N] | context -p KEY  what earlier agents learned, one call (--log N)
+  page add|show|edit|verify|list|history|rm   pages KEY:slug; --link --pin --append
+  search TEXT                     pages and log entries, best first (-p KEY, --limit N)
   export | import FILE|- | backup  move projects between databases; copy the database
-  guide | db                      this text; database path and schema version
-  page add|show|edit|list|rm | search   pages KEY:slug, search; every command has --help
+  guide | db                      this text (--agents: snippet); db path and schema version
+  Every command has --help.

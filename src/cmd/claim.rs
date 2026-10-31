@@ -7,7 +7,7 @@ use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
-use super::{Ctx, item, link, status, tag};
+use super::{Ctx, context, item, link, status, tag};
 use crate::db::{self, EventKind};
 use crate::error::{Result, err};
 use crate::model::{Category, parse_ttl};
@@ -110,6 +110,10 @@ pub struct NextArgs {
     /// How long the claim lasts: <n>m, <n>h or <n>d, 1m to 7d
     #[arg(long, default_value = "2h", value_parser = parse_ttl)]
     pub ttl: i64,
+    /// Also print the claimed task's context (as `apm context KEY-N`): claim and catch up in
+    /// one call
+    #[arg(long)]
+    pub context: bool,
 }
 
 #[derive(Args, Debug)]
@@ -169,7 +173,11 @@ pub fn next(ctx: &Ctx, args: NextArgs) -> Result<i32> {
             task: None,
             renewed: false,
         };
-        output::written(ctx.json, &none, "nothing ready")?;
+        let mut v = serde_json::to_value(&none)?;
+        if args.context {
+            v["context"] = serde_json::Value::Null;
+        }
+        output::written(ctx.json, &v, "nothing ready")?;
         return Ok(NOTHING_READY);
     };
     let before = item::get(&tx, r.id)?;
@@ -212,11 +220,29 @@ pub fn next(ctx: &Ctx, args: NextArgs) -> Result<i32> {
     let item = item::get(&ctx.conn, r.id)?;
     let verb = if renewed { "renewed" } else { "claimed" };
     let line = format!("{verb} {} until {expires}: {}", item.id, item.title);
+    let row_id = item.row_id;
+    let id = item.id.clone();
     let next = Next {
         task: Some(item),
         renewed,
     };
-    output::written(ctx.json, &next, &line)?;
+    if !args.context {
+        output::written(
+            ctx.json,
+            &next,
+            &format!("{line}\ncontext: apm context {id}"),
+        )?;
+        return Ok(0);
+    }
+    let c = context::for_task(&ctx.conn, row_id, context::DEFAULT_LOG)?;
+    if ctx.json {
+        let mut v = serde_json::to_value(&next)?;
+        v["context"] = serde_json::to_value(&c)?;
+        output::json(&v)?;
+    } else {
+        println!("{line}\n");
+        context::print_task(&c);
+    }
     Ok(0)
 }
 

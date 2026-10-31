@@ -177,7 +177,6 @@ pub fn for_item(conn: &Connection, item_id: i64) -> Result<Vec<Comment>> {
 }
 
 /// The questions on these tasks that no comment answers yet, oldest first.
-#[allow(dead_code)] // `apm context` (S4) lists them
 pub fn open_questions(conn: &Connection, item_ids: &[i64]) -> Result<Vec<Comment>> {
     if item_ids.is_empty() {
         return Ok(Vec::new());
@@ -193,7 +192,6 @@ pub fn open_questions(conn: &Connection, item_ids: &[i64]) -> Result<Vec<Comment
 }
 
 /// A task's newest comment of a kind (e.g. its latest handoff), if any.
-#[allow(dead_code)] // `apm context` (S4) shows the latest handoff
 pub fn latest(conn: &Connection, item_id: i64, kind: CommentKind) -> Result<Option<Comment>> {
     Ok(conn
         .query_row(
