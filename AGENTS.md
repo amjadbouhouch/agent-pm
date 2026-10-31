@@ -42,6 +42,7 @@ src/cmd/<group>.rs one module per command group: its clap args, its `run`, and
                    comment, status (custom statuses), link (link/unlink, blockers),
                    tag (tags, `apm tags`), history (`apm history`), mv (`apm move`),
                    claim (claim/release/next/claims; live claims),
+                   page (pages KEY:slug with versions and task links; `apm search`),
                    port (export/import/backup), guide (+ guide.txt), db
 src/db.rs          db path, schema migrations, SQL functions, shared lookups (project_id,
                    item KEY-N, current_key), record_event

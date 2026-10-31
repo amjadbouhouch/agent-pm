@@ -27,6 +27,18 @@ pub const COMMENT: Flags = Flags {
     empty: "comment text cannot be empty",
 };
 
+pub const PAGE_BODY: Flags = Flags {
+    stdin: "-b -",
+    file: "--body-file",
+    empty: "page body is empty; to clear it use page edit -b ''",
+};
+
+pub const APPEND: Flags = Flags {
+    stdin: "--append -",
+    file: "--append TEXT",
+    empty: "text to append cannot be empty",
+};
+
 pub const IMPORT: Flags = Flags {
     stdin: "import -",
     file: "import FILE",

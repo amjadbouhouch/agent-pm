@@ -117,4 +117,4 @@ COMMANDS
   comment KEY-N TEXT|-            add a comment (- reads stdin; --file PATH)
   export | import FILE|- | backup  move projects between databases; copy the database
   guide | db                      this text; database path and schema version
-  Every command has --help.
+  page add|show|edit|list|rm | search   pages KEY:slug, search; every command has --help

@@ -702,6 +702,41 @@ fn text_output_is_ascii() {
         &["list", "--claimed"],
         &["release", "APM-2"],
         &["rm", "APM-2"],
+        &[
+            "page",
+            "add",
+            "APM:storage",
+            "Storage",
+            "-s",
+            "SQLite file, WAL",
+            "-b",
+            "line one\n\nline two",
+            "--link",
+            "APM-3",
+            "--pin",
+        ],
+        &[
+            "page",
+            "edit",
+            "APM:storage",
+            "--append",
+            "more",
+            "--link",
+            "INFRA-1",
+        ],
+        &["page", "show", "APM:storage"],
+        &["page", "show", "APM:storage", "--version", "1"],
+        &["page", "list"],
+        &["page", "list", "--task", "APM-3", "--pinned"],
+        &["page", "history", "APM:storage"],
+        &["page", "verify", "APM:storage"],
+        &["history", "APM-3"],
+        &["search", "line"],
+        &["search", "multi line"],
+        &["search", "\"(-:*"],
+        &["page", "edit", "APM:storage", "--rename", "disk"],
+        &["page", "edit", "APM:disk", "--pin"],
+        &["page", "rm", "APM:disk"],
         &["db"],
         &["guide"],
     ];
@@ -715,6 +750,17 @@ fn text_output_is_ascii() {
         &["move", "INFRA-1", "OPS"],
         &["claim", "APM-3"],
         &["next", "-p", "APM"],
+        &["page", "show", "APM:nope"],
+        &["page", "add", "APM:bad_slug", "x"],
+        &[
+            "page",
+            "edit",
+            "APM:nope",
+            "-b",
+            "x",
+            "--expect-version",
+            "1",
+        ],
     ];
     let mut out = String::new();
     for (args, ok) in story
@@ -734,6 +780,8 @@ fn text_output_is_ascii() {
     let mut out = out.replace(&path, "");
     all_help(&env, &mut Vec::new(), &mut out);
     assert!(out.contains("APM-1 -> OPS-1"), "the story ran: {out}");
+    assert!(out.contains("APM:storage  Storage"), "pages ran: {out}");
+    assert!(out.contains("[line]"), "search ran: {out}");
     assert!(
         out.contains(
             "
