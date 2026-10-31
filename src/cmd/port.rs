@@ -963,20 +963,26 @@ fn check(data: &mut Export) -> Result<()> {
     Ok(())
 }
 
-/// Comment `n` (0-based) of a task: only an answer answers, and it answers an earlier
+/// Comment `n` (0-based) of a task: an answer, and only an answer, answers an earlier
 /// question of the same task (`answers` is that question's 1-based position).
 fn check_answers(comments: &[Comment], n: usize) -> Result<()> {
     let c = &comments[n];
-    let Some(q) = c.answers else {
-        return Ok(());
-    };
     let at = n + 1;
-    if c.kind != CommentKind::Answer {
-        return Err(err(format!(
-            "comment {at} is a {}, only an answer has `answers`",
-            c.kind.as_str()
-        )));
-    }
+    let q = match (c.kind, c.answers) {
+        (CommentKind::Answer, Some(q)) => q,
+        (CommentKind::Answer, None) => {
+            return Err(err(format!(
+                "comment {at} is an answer but does not say which question it answers"
+            )));
+        }
+        (_, None) => return Ok(()),
+        (kind, Some(_)) => {
+            return Err(err(format!(
+                "comment {at} is a {}, only an answer has `answers`",
+                kind.as_str()
+            )));
+        }
+    };
     if q < 1 || q as usize >= at {
         return Err(err(format!(
             "comment {at} answers comment {q}, which is not an earlier comment of this task"

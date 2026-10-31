@@ -1207,7 +1207,15 @@ fn import_rejects_broken_pages_and_answers() {
         ),
         (
             &|v| page(v)["verified_at"] = "2026-10-03T10:00:00Z".into(),
-            "verified_by and verified_at go together",
+            "page APM:notes: verified_by and verified_at go together",
+        ),
+        (
+            &|v| page(v)["verified_by"] = "carol".into(),
+            "page APM:notes: verified_by and verified_at go together",
+        ),
+        (
+            &|v| page(v)["versions"][0]["title"] = "  ".into(),
+            "page APM:notes: version 1: title cannot be empty",
         ),
         (
             &|v| page(v)["versions"][0]["at"] = "monday".into(),
@@ -1262,6 +1270,10 @@ fn import_rejects_broken_pages_and_answers() {
         (
             &|v| comments(v)[2]["answers"] = 1.into(),
             "APM-1: comment 3 is a handoff, only an answer has `answers`",
+        ),
+        (
+            &|v| comments(v)[1]["answers"] = Value::Null,
+            "APM-1: comment 2 is an answer but does not say which question it answers",
         ),
         (
             &|v| comments(v)[0]["kind"] = "rant".into(),
