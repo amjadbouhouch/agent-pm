@@ -12,14 +12,14 @@ use serde_json::{Value, json};
 
 use super::attr::{self, AttrType};
 use super::link::{self, LinkKind};
-use super::{Ctx, milestone, status, tag};
+use super::{Ctx, milestone, page, status, tag};
 use crate::error::{AppError, Result, err};
-use crate::model::{self, Category, Priority, When};
+use crate::model::{self, Category, CommentKind, Priority, When};
 use crate::{db, input, output};
 
-/// The export format this apm writes and reads (`apm_export`). Bump it on any change to the
-/// shape below, and keep reading the old one.
-const VERSION: i64 = 1;
+/// The export format this apm writes (`apm_export`). Bump it on any change to the shape
+/// below, and keep reading the old ones (`parse`): 1 had no log kinds, pages or page links.
+const VERSION: i64 = 2;
 
 #[derive(Args, Debug)]
 pub struct ExportArgs {
@@ -63,6 +63,7 @@ struct Export {
     exported_at: String,
     projects: Vec<Project>,
     links: Vec<Link>,
+    page_links: Vec<PageLink>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -77,6 +78,7 @@ struct Project {
     statuses: Vec<Status>,
     milestones: Vec<Milestone>,
     attributes: Vec<Attribute>,
+    pages: Vec<Page>,
     tasks: Vec<Task>,
 }
 
@@ -151,6 +153,9 @@ struct Task {
 #[serde(deny_unknown_fields)]
 struct Comment {
     author: String,
+    kind: CommentKind,
+    /// For an answer: the 1-based position of its question in the task's comments.
+    answers: Option<i64>,
     body: String,
     created_at: String,
 }
@@ -172,6 +177,45 @@ struct Link {
     from: String,
     kind: LinkKind,
     to: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Page {
+    slug: String,
+    title: String,
+    summary: String,
+    body: String,
+    pinned: bool,
+    version: i64,
+    created_by: String,
+    created_at: String,
+    updated_by: String,
+    updated_at: String,
+    verified_by: Option<String>,
+    verified_at: Option<String>,
+    /// Every version, 1 to `version`; the last is the page's current content.
+    versions: Vec<PageVersion>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PageVersion {
+    version: i64,
+    title: String,
+    summary: String,
+    body: String,
+    author: String,
+    at: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PageLink {
+    /// `KEY:slug`
+    page: String,
+    /// `KEY-N`
+    task: String,
 }
 
 // ---- export ----
@@ -201,6 +245,7 @@ pub fn export(ctx: &Ctx, args: ExportArgs) -> Result<()> {
         apm_export: VERSION,
         exported_at: tx.query_row(&format!("SELECT {}", db::NOW_SQL), [], |r| r.get(0))?,
         links: export_links(&tx, &ids)?,
+        page_links: export_page_links(&tx, &ids)?,
         projects,
     };
     tx.finish()?;
@@ -210,11 +255,14 @@ pub fn export(ctx: &Ctx, args: ExportArgs) -> Result<()> {
     write_whole(&path, &(serde_json::to_string_pretty(&data)? + "\n"))?;
     let keys: Vec<&str> = data.projects.iter().map(|p| p.key.as_str()).collect();
     let tasks: usize = data.projects.iter().map(|p| p.tasks.len()).sum();
+    let pages: usize = data.projects.iter().map(|p| p.pages.len()).sum();
     let summary = json!({
         "path": path.display().to_string(),
         "projects": keys,
         "tasks": tasks,
+        "pages": pages,
         "links": data.links.len(),
+        "page_links": data.page_links.len(),
     });
     let line = format!(
         "exported {} ({tasks} tasks) to {}",
@@ -312,6 +360,7 @@ fn export_project(conn: &Connection, id: i64) -> Result<Project> {
         })
     })
     .collect::<Result<_>>()?;
+    let pages = export_pages(conn, id)?;
     let tasks = rows(
         conn,
         "SELECT i.id, p.key || '-' || i.seq, pp.key || '-' || pa.seq, i.title, i.body, s.name,
@@ -353,18 +402,7 @@ fn export_project(conn: &Connection, id: i64) -> Result<Project> {
         Ok(Task {
             values: attr::stored_values(conn, item_id)?,
             tags: tag::for_item(conn, item_id)?,
-            comments: rows(
-                conn,
-                "SELECT author, body, created_at FROM comments WHERE item_id = ?1 ORDER BY id",
-                item_id,
-                |r| {
-                    Ok(Comment {
-                        author: r.get(0)?,
-                        body: r.get(1)?,
-                        created_at: r.get(2)?,
-                    })
-                },
-            )?,
+            comments: export_comments(conn, item_id)?,
             events: rows(
                 conn,
                 "SELECT actor, at, kind, field, old, new FROM events WHERE item_id = ?1 ORDER BY id",
@@ -394,8 +432,99 @@ fn export_project(conn: &Connection, id: i64) -> Result<Project> {
         statuses,
         milestones,
         attributes,
+        pages,
         tasks,
     })
+}
+
+/// A task's comments, oldest first; an answer points at its question by position (1-based),
+/// since the file has no comment ids.
+fn export_comments(conn: &Connection, item_id: i64) -> Result<Vec<Comment>> {
+    let all = rows(
+        conn,
+        "SELECT id, author, kind, answers, body, created_at FROM comments
+         WHERE item_id = ?1 ORDER BY id",
+        item_id,
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<i64>>(3)?,
+                Comment {
+                    author: r.get(1)?,
+                    kind: r.get(2)?,
+                    answers: None,
+                    body: r.get(4)?,
+                    created_at: r.get(5)?,
+                },
+            ))
+        },
+    )?;
+    let position: HashMap<i64, i64> = all
+        .iter()
+        .enumerate()
+        .map(|(n, (id, _, _))| (*id, n as i64 + 1))
+        .collect();
+    Ok(all
+        .into_iter()
+        .map(|(_, answers, c)| Comment {
+            answers: answers.and_then(|id| position.get(&id).copied()),
+            ..c
+        })
+        .collect())
+}
+
+/// A project's pages by slug, each with its versions.
+fn export_pages(conn: &Connection, project_id: i64) -> Result<Vec<Page>> {
+    rows(
+        conn,
+        "SELECT id, slug, title, summary, body, pinned, version, created_by, created_at,
+                updated_by, updated_at, verified_by, verified_at
+         FROM pages WHERE project_id = ?1 ORDER BY slug",
+        project_id,
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                Page {
+                    slug: r.get(1)?,
+                    title: r.get(2)?,
+                    summary: r.get(3)?,
+                    body: r.get(4)?,
+                    pinned: r.get(5)?,
+                    version: r.get(6)?,
+                    created_by: r.get(7)?,
+                    created_at: r.get(8)?,
+                    updated_by: r.get(9)?,
+                    updated_at: r.get(10)?,
+                    verified_by: r.get(11)?,
+                    verified_at: r.get(12)?,
+                    versions: Vec::new(),
+                },
+            ))
+        },
+    )?
+    .into_iter()
+    .map(|(page_id, page)| {
+        Ok(Page {
+            versions: rows(
+                conn,
+                "SELECT version, title, summary, body, author, at FROM page_versions
+                 WHERE page_id = ?1 ORDER BY version",
+                page_id,
+                |r| {
+                    Ok(PageVersion {
+                        version: r.get(0)?,
+                        title: r.get(1)?,
+                        summary: r.get(2)?,
+                        body: r.get(3)?,
+                        author: r.get(4)?,
+                        at: r.get(5)?,
+                    })
+                },
+            )?,
+            ..page
+        })
+    })
+    .collect()
 }
 
 /// Links whose both ends are in the exported projects.
@@ -423,6 +552,34 @@ fn export_links(conn: &Connection, project_ids: &[i64]) -> Result<Vec<Link>> {
     Ok(all
         .into_iter()
         .filter(|(_, from, to)| project_ids.contains(from) && project_ids.contains(to))
+        .map(|(link, _, _)| link)
+        .collect())
+}
+
+/// Page links whose page and task are both in the exported projects.
+fn export_page_links(conn: &Connection, project_ids: &[i64]) -> Result<Vec<PageLink>> {
+    let mut stmt = conn.prepare(
+        "SELECT pp.key || ':' || pg.slug, pt.key || '-' || i.seq, pg.project_id, i.project_id
+         FROM page_links l
+         JOIN pages pg ON pg.id = l.page_id JOIN projects pp ON pp.id = pg.project_id
+         JOIN items i ON i.id = l.item_id JOIN projects pt ON pt.id = i.project_id
+         ORDER BY pp.key, pg.slug, pt.key, i.seq",
+    )?;
+    let all = stmt
+        .query_map([], |r| {
+            Ok((
+                PageLink {
+                    page: r.get(0)?,
+                    task: r.get(1)?,
+                },
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(all
+        .into_iter()
+        .filter(|(_, page, task)| project_ids.contains(page) && project_ids.contains(task))
         .map(|(link, _, _)| link)
         .collect())
 }
@@ -462,15 +619,21 @@ pub fn import(ctx: &Ctx, args: ImportArgs) -> Result<()> {
     // Everything in one write transaction: a failure (or --dry-run) leaves the database as it was.
     let tx = db::write_tx(&ctx.conn)?;
     let mut ids = HashMap::new();
+    let mut page_ids = HashMap::new();
     let mut done = Vec::new();
     for project in &data.projects {
         let key = new_key.clone().unwrap_or_else(|| project.key.clone());
-        let claimed = import_project(&tx, project, &key, &mut ids)?;
+        let claimed = import_project(&tx, project, &key, &mut ids, &mut page_ids)?;
         done.push((project, key, claimed));
     }
     let mut stmt = tx.prepare("INSERT INTO links (from_id, to_id, kind) VALUES (?1, ?2, ?3)")?;
     for link in &data.links {
         stmt.execute(params![ids[&link.from], ids[&link.to], link.kind.as_str()])?;
+    }
+    drop(stmt);
+    let mut stmt = tx.prepare("INSERT INTO page_links (page_id, item_id) VALUES (?1, ?2)")?;
+    for link in &data.page_links {
+        stmt.execute(params![page_ids[&link.page], ids[&link.task]])?;
     }
     drop(stmt);
     if args.dry_run {
@@ -489,17 +652,19 @@ pub fn import(ctx: &Ctx, args: ImportArgs) -> Result<()> {
     for (p, key, claimed) in done {
         let comments: usize = p.tasks.iter().map(|t| t.comments.len()).sum();
         let events: usize = p.tasks.iter().map(|t| t.events.len()).sum();
+        let versions: usize = p.pages.iter().map(|g| g.versions.len()).sum();
         let mut line = format!("{verb} {key}");
         if *key != p.key {
             line.push_str(&format!(" (from {})", p.key));
         }
         line.push_str(&format!(
             ": {} tasks, {} statuses, {} milestones, {} attributes, {comments} comments, \
-             {events} events",
+             {events} events, {} pages ({versions} versions)",
             p.tasks.len(),
             p.statuses.len(),
             p.milestones.len(),
             p.attributes.len(),
+            p.pages.len(),
         ));
         let mut value = json!({
             "key": key,
@@ -511,6 +676,8 @@ pub fn import(ctx: &Ctx, args: ImportArgs) -> Result<()> {
             "attributes": p.attributes.len(),
             "comments": comments,
             "events": events,
+            "pages": p.pages.len(),
+            "page_versions": versions,
         });
         if let Some(from) = claimed {
             line.push_str(&format!(
@@ -521,29 +688,71 @@ pub fn import(ctx: &Ctx, args: ImportArgs) -> Result<()> {
         lines.push(line);
         projects.push(value);
     }
-    lines.push(format!("{verb} {} links", data.links.len()));
+    lines.push(format!(
+        "{verb} {} links, {} page links",
+        data.links.len(),
+        data.page_links.len()
+    ));
     let summary = json!({
         "dry_run": args.dry_run,
         "projects": projects,
         "links": data.links.len(),
+        "page_links": data.page_links.len(),
     });
     output::written(ctx.json, &summary, &lines.join("\n"))
 }
 
 /// Parse an export file: an object with a supported `apm_export` version, then the full shape.
 fn parse(text: &str) -> Result<Export> {
-    let value: Value =
+    let mut value: Value =
         serde_json::from_str(text).map_err(|e| err(format!("invalid export file: {e}")))?;
     match value.get("apm_export").map(Value::as_i64) {
-        None => Err(err("not an apm export: no apm_export field")),
-        Some(Some(VERSION)) => {
-            serde_json::from_value(value).map_err(|e| err(format!("invalid export file: {e}")))
+        None => return Err(err("not an apm export: no apm_export field")),
+        Some(Some(1)) => upgrade_v1(&mut value)?,
+        Some(Some(VERSION)) => {}
+        Some(_) => {
+            return Err(err(format!(
+                "unsupported export version {}; this apm reads 1 to {VERSION}",
+                value["apm_export"]
+            )));
         }
-        Some(_) => Err(err(format!(
-            "unsupported export version {}; this apm reads {VERSION}",
-            value["apm_export"]
-        ))),
     }
+    serde_json::from_value(value).map_err(|e| err(format!("invalid export file: {e}")))
+}
+
+/// Bring a version 1 file to the current shape: every comment is a note, and there are no
+/// pages or page links. The fields version 1 did not have stay unknown in a version 1 file.
+fn upgrade_v1(value: &mut Value) -> Result<()> {
+    fn add(obj: &mut serde_json::Map<String, Value>, field: &str, v: Value) -> Result<()> {
+        if obj.contains_key(field) {
+            return Err(err(format!(
+                "invalid export file: unknown field `{field}` in apm_export 1"
+            )));
+        }
+        obj.insert(field.to_string(), v);
+        Ok(())
+    }
+    // Leave anything of the wrong shape alone: deserializing reports it.
+    fn list(v: Option<&mut Value>) -> impl Iterator<Item = &mut Value> {
+        v.and_then(Value::as_array_mut).into_iter().flatten()
+    }
+    let Some(top) = value.as_object_mut() else {
+        return Ok(());
+    };
+    add(top, "page_links", json!([]))?;
+    for p in list(top.get_mut("projects")) {
+        let Some(p) = p.as_object_mut() else { continue };
+        add(p, "pages", json!([]))?;
+        for t in list(p.get_mut("tasks")) {
+            for c in list(t.get_mut("comments")) {
+                if let Some(c) = c.as_object_mut() {
+                    add(c, "kind", json!("note"))?;
+                    add(c, "answers", Value::Null)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Validate the file before anything is written, with the rules of the commands that create
@@ -552,8 +761,9 @@ fn parse(text: &str) -> Result<Export> {
 /// Database conflicts (an existing key) are found by the write itself, inside the transaction.
 fn check(data: &mut Export) -> Result<()> {
     let mut keys = HashSet::new();
-    // Every task in the file, as KEY-N (the file's keys).
+    // Every task and page in the file, as KEY-N and KEY:slug (the file's keys).
     let mut all_tasks = HashSet::new();
+    let mut all_pages = HashSet::new();
     for p in &mut data.projects {
         let pkey = p.key.clone();
         let at = |e: AppError| err(format!("project {pkey}: {e}"));
@@ -613,6 +823,16 @@ fn check(data: &mut Export) -> Result<()> {
             }
         }
 
+        let mut slugs = HashSet::new();
+        for page in &p.pages {
+            let id = format!("{}:{}", p.key, page.slug);
+            check_page(page).map_err(|e| err(format!("page {id}: {e}")))?;
+            if !slugs.insert(page.slug.clone()) {
+                return Err(at(err(format!("page appears twice: {id}"))));
+            }
+            all_pages.insert(id);
+        }
+
         // Task numbers first, so a parent may come after its subtask.
         let mut parents = HashMap::new();
         for t in &p.tasks {
@@ -668,8 +888,9 @@ fn check(data: &mut Export) -> Result<()> {
             t.tags.dedup();
             check_time(&t.created_at).map_err(at)?;
             check_time(&t.updated_at).map_err(at)?;
-            for c in &t.comments {
+            for (n, c) in t.comments.iter().enumerate() {
                 check_time(&c.created_at).map_err(at)?;
+                check_answers(&t.comments, n).map_err(at)?;
             }
             for e in &t.events {
                 if db::EventKind::parse(&e.kind).is_none() {
@@ -722,6 +943,102 @@ fn check(data: &mut Export) -> Result<()> {
             blocks.entry(&l.from).or_default().push(&l.to);
         }
     }
+
+    let mut seen = HashSet::new();
+    for l in &data.page_links {
+        let name = format!("page link {} {}", l.page, l.task);
+        if !all_pages.contains(&l.page) {
+            return Err(err(format!("{name}: no such page in the file: {}", l.page)));
+        }
+        if !all_tasks.contains(&l.task) {
+            return Err(err(format!("{name}: no such task in the file: {}", l.task)));
+        }
+        if !seen.insert((&l.page, &l.task)) {
+            return Err(err(format!("{name}: appears twice")));
+        }
+    }
+    Ok(())
+}
+
+/// Comment `n` (0-based) of a task: an answer, and only an answer, answers an earlier
+/// question of the same task (`answers` is that question's 1-based position).
+fn check_answers(comments: &[Comment], n: usize) -> Result<()> {
+    let c = &comments[n];
+    let at = n + 1;
+    let q = match (c.kind, c.answers) {
+        (CommentKind::Answer, Some(q)) => q,
+        (CommentKind::Answer, None) => {
+            return Err(err(format!(
+                "comment {at} is an answer but does not say which question it answers"
+            )));
+        }
+        (_, None) => return Ok(()),
+        (kind, Some(_)) => {
+            return Err(err(format!(
+                "comment {at} is a {}, only an answer has `answers`",
+                kind.as_str()
+            )));
+        }
+    };
+    if q < 1 || q as usize >= at {
+        return Err(err(format!(
+            "comment {at} answers comment {q}, which is not an earlier comment of this task"
+        )));
+    }
+    let kind = comments[q as usize - 1].kind;
+    if kind != CommentKind::Question {
+        return Err(err(format!(
+            "comment {at} answers comment {q}, which is a {}, not a question",
+            kind.as_str()
+        )));
+    }
+    Ok(())
+}
+
+/// A page as `apm page` would have written it: a lowercase slug, a title, a short summary,
+/// and every version from 1 to `version`, the last one being the page's content.
+fn check_page(page: &Page) -> Result<()> {
+    if db::check_slug(&page.slug)? != page.slug {
+        return Err(err(format!("page slug must be lowercase: {}", page.slug)));
+    }
+    page::check_content(Some(&page.title), Some(&page.summary))?;
+    for t in [&page.created_at, &page.updated_at] {
+        check_time(t)?;
+    }
+    match (&page.verified_by, &page.verified_at) {
+        (Some(_), Some(at)) => check_time(at)?,
+        (None, None) => {}
+        _ => return Err(err("verified_by and verified_at go together")),
+    }
+    if page.version < 1 {
+        return Err(err(format!("invalid version {}", page.version)));
+    }
+    for (i, v) in page.versions.iter().enumerate() {
+        let want = i as i64 + 1;
+        if v.version != want {
+            return Err(err(format!(
+                "versions must run 1 to {} in order: expected version {want}, found {}",
+                page.version, v.version
+            )));
+        }
+        let at = |e: AppError| err(format!("version {want}: {e}"));
+        page::check_content(Some(&v.title), Some(&v.summary)).map_err(at)?;
+        check_time(&v.at).map_err(at)?;
+    }
+    if page.versions.len() as i64 != page.version {
+        return Err(err(format!(
+            "versions must run 1 to {}: the file has {}",
+            page.version,
+            page.versions.len()
+        )));
+    }
+    let last = &page.versions[page.versions.len() - 1];
+    if (&last.title, &last.summary, &last.body) != (&page.title, &page.summary, &page.body) {
+        return Err(err(format!(
+            "version {} differs from the page's title, summary or body",
+            page.version
+        )));
+    }
     Ok(())
 }
 
@@ -752,12 +1069,14 @@ fn check_time(s: &str) -> Result<()> {
 }
 
 /// Create one project from a checked file under `key`, adding its tasks to `ids` (file
-/// `KEY-N` -> new row id) for the links. Returns the project whose alias `key` was, if any.
+/// `KEY-N` -> new row id) and its pages to `page_ids` (file `KEY:slug` -> new row id) for the
+/// links. Returns the project whose alias `key` was, if any.
 fn import_project(
     tx: &Connection,
     p: &Project,
     key: &str,
     ids: &mut HashMap<String, i64>,
+    page_ids: &mut HashMap<String, i64>,
 ) -> Result<Option<String>> {
     let claimed = db::claim_project_key(tx, key, None)?;
     db::unique(
@@ -818,6 +1137,41 @@ fn import_project(
         )?;
         attrs.insert(a.name.as_str(), tx.last_insert_rowid());
     }
+    // The FTS triggers index each page as it is inserted.
+    for page in &p.pages {
+        tx.execute(
+            "INSERT INTO pages (project_id, slug, title, summary, body, pinned, version,
+                                created_by, created_at, updated_by, updated_at, verified_by,
+                                verified_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                project_id,
+                page.slug,
+                page.title,
+                page.summary,
+                page.body,
+                page.pinned,
+                page.version,
+                page.created_by,
+                page.created_at,
+                page.updated_by,
+                page.updated_at,
+                page.verified_by,
+                page.verified_at
+            ],
+        )?;
+        let page_id = tx.last_insert_rowid();
+        page_ids.insert(format!("{}:{}", p.key, page.slug), page_id);
+        for v in &page.versions {
+            tx.execute(
+                "INSERT INTO page_versions (page_id, version, title, summary, body, author, at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    page_id, v.version, v.title, v.summary, v.body, v.author, v.at
+                ],
+            )?;
+        }
+    }
 
     // check() put values and tags in their stored form.
     let mut seq_ids = HashMap::new();
@@ -858,11 +1212,23 @@ fn import_project(
                 params![item_id, tag],
             )?;
         }
+        // check() made every `answers` the position of an earlier comment.
+        let mut comment_ids = Vec::new();
         for c in &t.comments {
+            let answers = c.answers.map(|n| comment_ids[n as usize - 1]);
             tx.execute(
-                "INSERT INTO comments (item_id, author, body, created_at) VALUES (?1, ?2, ?3, ?4)",
-                params![item_id, c.author, c.body, c.created_at],
+                "INSERT INTO comments (item_id, kind, answers, author, body, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    item_id,
+                    c.kind.as_str(),
+                    answers,
+                    c.author,
+                    c.body,
+                    c.created_at
+                ],
             )?;
+            comment_ids.push(tx.last_insert_rowid());
         }
         for e in &t.events {
             tx.execute(
