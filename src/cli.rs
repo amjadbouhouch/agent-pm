@@ -82,7 +82,7 @@ pub enum Command {
     /// Manage a project's custom attributes
     #[command(subcommand)]
     Attr(attr::AttrCmd),
-    /// Add a comment to a task
+    /// Log on a task: a note, handoff, question or answer (--kind, --answer)
     Comment(comment::CommentArgs),
     /// Link two tasks: A blocks|relates|duplicates B
     Link(link::LinkArgs),

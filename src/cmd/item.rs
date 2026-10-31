@@ -520,11 +520,22 @@ pub fn show(ctx: &Ctx, args: ShowArgs) -> Result<()> {
             // Continuation lines of a multi-line comment are indented under it.
             let mut lines = c.body.lines();
             let first = lines.next().unwrap_or_default();
-            println!("  {} {}: {first}", c.created_at, c.author);
+            println!("  {} {}{}: {first}", c.created_at, c.author, kind_mark(c));
             print_text("    ", lines);
         }
     }
     Ok(())
+}
+
+/// How `show` marks a log entry that is not a plain note: ` [handoff]`, ` [question #41]`
+/// (the id to answer), ` [answer #41]` (the question it answers).
+fn kind_mark(c: &comment::Comment) -> String {
+    match (c.kind.as_str(), c.answers) {
+        ("note", _) => String::new(),
+        ("question", _) => format!(" [question #{}]", c.id),
+        ("answer", Some(q)) => format!(" [answer #{q}]"),
+        (kind, _) => format!(" [{kind}]"),
+    }
 }
 
 pub fn edit(ctx: &Ctx, mut args: EditArgs) -> Result<()> {
