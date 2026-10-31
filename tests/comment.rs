@@ -176,6 +176,9 @@ fn comment_kinds() {
     assert_eq!(a2["kind"], "answer");
     // A question may get several answers.
     assert_eq!(a2["answers"], a["answers"]);
+    // `#N`, as show and `asked on` print it, works like N.
+    let a3 = env.json(&["comment", "APM-1", "--answer", &format!("#{q}"), "same"]);
+    assert_eq!(a3["answers"], a["answers"]);
 
     // show returns the same objects, oldest first.
     let comments = env.json(&["show", "APM-1"])["comments"].clone();
@@ -185,7 +188,10 @@ fn comment_kinds() {
         .iter()
         .map(|c| c["kind"].as_str().unwrap())
         .collect();
-    assert_eq!(kinds, ["question", "handoff", "note", "answer", "answer"]);
+    assert_eq!(
+        kinds,
+        ["question", "handoff", "note", "answer", "answer", "answer"]
+    );
     assert_eq!(comments[3], a);
 }
 
@@ -210,6 +216,10 @@ fn comment_kind_text_output() {
     );
     run(
         &["comment", "APM-1", "--answer", &q.to_string(), "a"],
+        format!("answered #{q} on APM-1\n"),
+    );
+    run(
+        &["comment", "APM-1", "--answer", &format!("#{q}"), "b"],
         format!("answered #{q} on APM-1\n"),
     );
 }
@@ -284,25 +294,38 @@ fn answer_errors() {
     );
     assert_eq!(ans("APM-1", 999), "no such comment: #999");
     assert_eq!(ans("APM-9", q1), "no such item: APM-9");
-    assert_eq!(
-        env.json_err(&[
-            "comment",
-            "APM-1",
-            "--kind",
-            "handoff",
-            "--answer",
-            &q1.to_string(),
-            "x"
-        ]),
-        "--answer makes the comment an answer, not a handoff; drop --kind"
+    // Usage errors (exit 2, `{"error": ...}` under --json): --answer with another kind;
+    // --kind answer without --answer; unknown kinds; a malformed id.
+    let q = q1.to_string();
+    let usage = |args: &[&str]| -> String {
+        let out = env.apm().arg("--json").args(args).assert().code(2);
+        let v: serde_json::Value = serde_json::from_slice(&out.get_output().stderr).unwrap();
+        v["error"].as_str().unwrap().to_string()
+    };
+    for kind in ["handoff", "question", "note"] {
+        assert_eq!(
+            usage(&["comment", "APM-1", "--kind", kind, "--answer", &q, "x"]),
+            format!("--answer makes the comment an answer, not a {kind}; drop --kind")
+        );
+    }
+    let out = env
+        .apm()
+        .args(["comment", "APM-1", "--kind", "handoff", "--answer", &q, "x"])
+        .assert()
+        .code(2);
+    assert!(
+        String::from_utf8_lossy(&out.get_output().stderr).starts_with(
+            "error: --answer makes the comment an answer, not a handoff; drop --kind\n"
+        )
     );
-    // Usage errors: --kind answer needs --answer; unknown kinds; a non-numeric id.
-    for args in [
-        &["--json", "comment", "APM-1", "--kind", "answer", "x"][..],
-        &["--json", "comment", "APM-1", "--kind", "todo", "x"],
-        &["--json", "comment", "APM-1", "--answer", "#3", "x"],
-    ] {
-        env.apm().args(args).assert().code(2);
+    usage(&["comment", "APM-1", "--kind", "answer", "x"]);
+    usage(&["comment", "APM-1", "--kind", "todo", "x"]);
+    for id in ["##3", "#", "3a", "0"] {
+        assert!(
+            usage(&["comment", "APM-1", "--answer", id, "x"])
+                .contains("expected a comment id like 41 or #41"),
+            "{id}"
+        );
     }
     env.apm()
         .args(["comment", "APM-1", "--answer", "999", "x"])
@@ -351,6 +374,7 @@ fn comment_help_says_what_each_kind_is_for() {
         "Something you could not settle; it stays open until someone answers it",
         "The answer to a question on this task",
         "--answer <ID>",
+        "`41` or `#41` as `show` prints it",
     ] {
         assert!(help.contains(line), "{line} not in:\n{help}");
     }

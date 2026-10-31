@@ -27,10 +27,36 @@ pub struct CommentArgs {
     /// What the entry is for (default note); `show` marks every kind but note
     #[arg(long, value_enum)]
     pub kind: Option<CommentKind>,
-    /// Answer question #ID on this task (makes the entry an answer; the question is no
-    /// longer open)
-    #[arg(long, value_name = "ID", required_if_eq("kind", "answer"))]
+    /// Answer question #ID on this task, `41` or `#41` as `show` prints it (makes the entry
+    /// an answer; the question is no longer open)
+    #[arg(
+        long,
+        value_name = "ID",
+        required_if_eq("kind", "answer"),
+        value_parser = parse_comment_id
+    )]
     pub answer: Option<i64>,
+}
+
+/// clap value parser for a comment id: `41`, or `#41` as `show` and `comment` print it.
+fn parse_comment_id(s: &str) -> std::result::Result<i64, String> {
+    let n = s.strip_prefix('#').unwrap_or(s);
+    match n.parse::<i64>() {
+        Ok(id) if id > 0 && n.bytes().all(|b| b.is_ascii_digit()) => Ok(id),
+        _ => Err(format!("expected a comment id like 41 or #41, got `{s}`")),
+    }
+}
+
+/// `--answer` with a `--kind` other than answer, as a usage error (checked after parsing:
+/// clap has no conflict with one value of an argument).
+pub fn kind_conflict(args: &CommentArgs) -> Option<String> {
+    match (args.kind, args.answer) {
+        (Some(k), Some(_)) if k != CommentKind::Answer => Some(format!(
+            "--answer makes the comment an answer, not a {}; drop --kind",
+            k.as_str()
+        )),
+        _ => None,
+    }
 }
 
 #[derive(Serialize, Debug)]
@@ -38,8 +64,7 @@ pub struct Comment {
     pub id: i64,
     /// The task's KEY-N
     pub item: String,
-    /// note, handoff, question or answer
-    pub kind: String,
+    pub kind: CommentKind,
     /// For an answer: the id of the question it answers (None once that question is gone)
     pub answers: Option<i64>,
     pub author: String,
@@ -67,15 +92,10 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Comment> {
 
 /// `apm comment KEY-N <text>`: add a log entry (a comment) authored by the actor.
 pub fn run(ctx: &Ctx, args: CommentArgs) -> Result<()> {
-    let kind = match (args.kind, args.answer) {
-        (Some(k), Some(_)) if k != CommentKind::Answer => {
-            return Err(err(format!(
-                "--answer makes the comment an answer, not a {}; drop --kind",
-                k.as_str()
-            )));
-        }
-        (_, Some(_)) => CommentKind::Answer,
-        (k, None) => k.unwrap_or(CommentKind::Note),
+    // `kind_conflict` already rejected --answer with another --kind.
+    let kind = match args.answer {
+        Some(_) => CommentKind::Answer,
+        None => args.kind.unwrap_or(CommentKind::Note),
     };
     let text =
         input::read_text(args.text, args.file.as_deref(), &input::COMMENT)?.unwrap_or_default();
@@ -114,22 +134,18 @@ pub fn run(ctx: &Ctx, args: CommentArgs) -> Result<()> {
     let c = ctx
         .conn
         .query_row(&format!("{SELECT} WHERE c.id = ?1"), params![id], row)?;
-    let line = match kind {
-        CommentKind::Note => format!("commented on {}", c.item),
-        CommentKind::Handoff => format!("handoff on {}", c.item),
-        CommentKind::Question => format!("asked on {} (#{})", c.item, c.id),
-        CommentKind::Answer => format!(
-            "answered #{} on {}",
-            args.answer.unwrap_or_default(),
-            c.item
-        ),
+    let line = match (c.kind, c.answers) {
+        (CommentKind::Question, _) => format!("asked on {} (#{})", c.item, c.id),
+        (CommentKind::Answer, Some(q)) => format!("answered #{q} on {}", c.item),
+        (CommentKind::Handoff, _) => format!("handoff on {}", c.item),
+        _ => format!("commented on {}", c.item),
     };
     output::written(ctx.json, &c, &line)
 }
 
 /// An answer's target must be a question on the same task.
 fn check_question(conn: &Connection, id: i64, item_id: i64) -> Result<()> {
-    let (on, kind): (i64, String) = conn
+    let (on, kind): (i64, CommentKind) = conn
         .query_row(
             "SELECT item_id, kind FROM comments WHERE id = ?1",
             params![id],
@@ -144,17 +160,13 @@ fn check_question(conn: &Connection, id: i64, item_id: i64) -> Result<()> {
             db::current_key(conn, item_id)?
         )));
     }
-    if kind != CommentKind::Question.as_str() {
-        let a = if kind.starts_with(['a', 'e', 'i', 'o', 'u']) {
-            "an"
-        } else {
-            "a"
-        };
-        return Err(err(format!(
-            "comment #{id} is not a question (it is {a} {kind})"
-        )));
-    }
-    Ok(())
+    let is = match kind {
+        CommentKind::Question => return Ok(()),
+        CommentKind::Note => "a note",
+        CommentKind::Handoff => "a handoff",
+        CommentKind::Answer => "an answer",
+    };
+    Err(err(format!("comment #{id} is not a question (it is {is})")))
 }
 
 /// A task's comments, oldest first. Used by `show`.
@@ -195,6 +207,15 @@ pub fn latest(conn: &Connection, item_id: i64, kind: CommentKind) -> Result<Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn comment_ids() {
+        assert_eq!(parse_comment_id("41"), Ok(41));
+        assert_eq!(parse_comment_id("#41"), Ok(41));
+        for bad in ["", "#", "##41", "0", "#0", "-3", "+3", "4a", "# 4"] {
+            assert!(parse_comment_id(bad).is_err(), "{bad}");
+        }
+    }
 
     /// A migrated in-memory database with tasks 1 and 2 (APM-1, APM-2) and comments
     /// `(task, kind, answers)`; comment ids are 1..n in order.
@@ -238,7 +259,7 @@ mod tests {
         assert_eq!(ids(&open_questions(&conn, &[2]).unwrap()), [5]);
         assert!(open_questions(&conn, &[]).unwrap().is_empty());
         let q = &open_questions(&conn, &[2]).unwrap()[0];
-        assert_eq!((q.item.as_str(), q.kind.as_str()), ("APM-2", "question"));
+        assert_eq!((q.item.as_str(), q.kind), ("APM-2", CommentKind::Question));
         // Answering closes it.
         conn.execute(
             "INSERT INTO comments (item_id, author, body, kind, answers)

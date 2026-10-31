@@ -81,6 +81,20 @@ impl CommentKind {
     }
 }
 
+/// Read back from `comments.kind`; every write goes through `as_str`.
+impl rusqlite::types::FromSql for CommentKind {
+    fn column_result(v: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        let s = v.as_str()?;
+        CommentKind::value_variants()
+            .iter()
+            .copied()
+            .find(|k| k.as_str() == s)
+            .ok_or_else(|| {
+                rusqlite::types::FromSqlError::Other(format!("unknown comment kind `{s}`").into())
+            })
+    }
+}
+
 /// clap value parser for `name=value` (used by `--set` and `--where`).
 pub fn parse_pair(s: &str) -> std::result::Result<(String, String), String> {
     match s.split_once('=') {
