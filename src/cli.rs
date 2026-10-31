@@ -4,7 +4,7 @@ use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser, Subcommand};
 
 use crate::cmd::{
-    attr, claim, comment, history, item, link, milestone, mv, port, project, status, tag,
+    attr, claim, comment, history, item, link, milestone, mv, page, port, project, status, tag,
 };
 
 /// agent-pm: a small project tracker for agents and humans.
@@ -91,6 +91,11 @@ pub enum Command {
     Attr(attr::AttrCmd),
     /// Log on a task: a note, handoff, question or answer (--kind, --answer)
     Comment(comment::CommentArgs),
+    /// Pages: knowledge that outlives a task (decisions + why, architecture, conventions)
+    #[command(subcommand)]
+    Page(page::PageCmd),
+    /// Find pages, then task log entries, by words (each best match first)
+    Search(page::SearchArgs),
     /// Link two tasks: A blocks|relates|duplicates B
     Link(link::LinkArgs),
     /// Remove a link between two tasks

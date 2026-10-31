@@ -697,7 +697,7 @@ fn line_row(id: &str, status: &str, title: &str) -> Vec<String> {
 }
 
 /// Lines of user text, each indented (blank lines stay empty).
-fn print_text<'a>(indent: &str, lines: impl Iterator<Item = &'a str>) {
+pub fn print_text<'a>(indent: &str, lines: impl Iterator<Item = &'a str>) {
     for line in lines {
         if line.trim().is_empty() {
             println!();

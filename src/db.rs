@@ -611,7 +611,6 @@ pub fn parse_item_key(s: &str) -> Result<(String, i64)> {
 
 /// Validate a page slug (1-40 of `a-z 0-9 -`, starting with a letter or digit); returns it
 /// lowercased.
-#[allow(dead_code)] // page commands (S2) and import (S3)
 pub fn check_slug(slug: &str) -> Result<String> {
     let ok = (1..=40).contains(&slug.len())
         && slug.starts_with(|c: char| c.is_ascii_alphanumeric())
@@ -626,7 +625,6 @@ pub fn check_slug(slug: &str) -> Result<String> {
 
 /// Split a page id `APM:storage` into (`APM`, `storage`), key uppercased and slug lowercased.
 /// The key is not looked up: it may be an alias (`project_id` resolves it).
-#[allow(dead_code)] // page commands (S2)
 pub fn parse_page_ref(s: &str) -> Result<(String, String)> {
     let bad = || {
         err(format!(

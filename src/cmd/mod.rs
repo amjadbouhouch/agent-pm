@@ -10,6 +10,7 @@ pub mod item;
 pub mod link;
 pub mod milestone;
 pub mod mv;
+pub mod page;
 pub mod port;
 pub mod project;
 pub mod status;
@@ -58,6 +59,8 @@ pub fn run(cli: Cli) -> Result<i32> {
         Command::Status(c) => status::run(&ctx, c),
         Command::Attr(c) => attr::run(&ctx, c),
         Command::Comment(a) => comment::run(&ctx, a),
+        Command::Page(c) => page::run(&ctx, c),
+        Command::Search(a) => page::search(&ctx, a),
         Command::Link(a) => link::link(&ctx, a),
         Command::Unlink(a) => link::unlink(&ctx, a),
         Command::Tags(a) => tag::run(&ctx, a),
