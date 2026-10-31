@@ -55,6 +55,46 @@ impl Priority {
     }
 }
 
+/// What a task log entry (a comment) is for. Stored as `comments.kind`; the doc comments are
+/// `apm comment --kind`'s help.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CommentKind {
+    /// A finding or progress on this task (the default)
+    Note,
+    /// What the next agent needs to pick this task up: state, next steps, decisions + why, where
+    Handoff,
+    /// Something you could not settle; it stays open until someone answers it (--answer ID)
+    Question,
+    /// The answer to a question on this task; use --answer ID
+    Answer,
+}
+
+impl CommentKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CommentKind::Note => "note",
+            CommentKind::Handoff => "handoff",
+            CommentKind::Question => "question",
+            CommentKind::Answer => "answer",
+        }
+    }
+}
+
+/// Read back from `comments.kind`; every write goes through `as_str`.
+impl rusqlite::types::FromSql for CommentKind {
+    fn column_result(v: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        let s = v.as_str()?;
+        CommentKind::value_variants()
+            .iter()
+            .copied()
+            .find(|k| k.as_str() == s)
+            .ok_or_else(|| {
+                rusqlite::types::FromSqlError::Other(format!("unknown comment kind `{s}`").into())
+            })
+    }
+}
+
 /// clap value parser for `name=value` (used by `--set` and `--where`).
 pub fn parse_pair(s: &str) -> std::result::Result<(String, String), String> {
     match s.split_once('=') {

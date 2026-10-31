@@ -128,7 +128,7 @@ fn count(env: &Env, sql: &str) -> i64 {
 #[test]
 fn v1_database_upgrades_to_v2() {
     let env = v1_env();
-    assert_eq!(env.json(&["db"])["schema_version"], 3);
+    assert_eq!(env.json(&["db"])["schema_version"], 4);
 
     // Every task keeps its row id, number, fields and status (now a row of its project).
     let conn = env.conn();
@@ -291,7 +291,7 @@ fn concurrent_first_opens_migrate_once() {
                 let stderr = String::from_utf8_lossy(&out.stderr);
                 assert!(out.status.success(), "{stderr}");
                 let v: Value = serde_json::from_slice(&out.stdout).unwrap();
-                assert_eq!(v["schema_version"], 3);
+                assert_eq!(v["schema_version"], 4);
             })
         })
         .collect();
@@ -330,7 +330,13 @@ fn v2_schema_keeps_foreign_keys_and_cascades() {
             t("status_id", "statuses", "NO ACTION"),
         ]
     );
-    assert_eq!(fk("comments"), [t("item_id", "items", "CASCADE")]);
+    assert_eq!(
+        fk("comments"),
+        [
+            t("answers", "comments", "SET NULL"),
+            t("item_id", "items", "CASCADE")
+        ]
+    );
     assert_eq!(fk("events"), [t("item_id", "items", "CASCADE")]);
     let no_old_column: bool = conn
         .query_row(
@@ -382,11 +388,39 @@ fn a_newer_schema_is_refused() {
     drop(conn);
     assert_eq!(
         env.json_err(&["db"]),
-        "database schema v99 is newer than this apm (v3); upgrade apm"
+        "database schema v99 is newer than this apm (v4); upgrade apm"
     );
 }
 
-/// A database as apm v0.2 left it (schema v2): today's schema without the v3 claim columns.
+/// Turn a current database back into schema v3: drop everything v4 added (pages, FTS tables
+/// and their triggers) and rebuild `comments` without `kind` and `answers`, exactly as v1
+/// created it (SQLite cannot drop a column that is a foreign key).
+fn downgrade_to_v3(conn: &rusqlite::Connection) {
+    conn.execute_batch(
+        "PRAGMA foreign_keys = OFF;
+         DROP TABLE comments_fts;
+         DROP TABLE pages_fts;
+         DROP TABLE page_links;
+         DROP TABLE page_versions;
+         DROP TABLE pages;
+         CREATE TABLE v3_comments (
+             id         INTEGER PRIMARY KEY,
+             item_id    INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+             author     TEXT NOT NULL,
+             body       TEXT NOT NULL,
+             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+         );
+         INSERT INTO v3_comments SELECT id, item_id, author, body, created_at FROM comments;
+         DROP TABLE comments;
+         ALTER TABLE v3_comments RENAME TO comments;
+         CREATE INDEX comments_item ON comments(item_id);
+         PRAGMA foreign_keys = ON;",
+    )
+    .unwrap();
+    conn.pragma_update(None, "user_version", 3).unwrap();
+}
+
+/// A database as apm v0.2 left it (schema v2): the v3 schema without the claim columns.
 fn v2_env() -> Env {
     let env = Env::new();
     env.json(&["project", "add", "APM", "Agent PM"]);
@@ -394,6 +428,7 @@ fn v2_env() -> Env {
     env.json(&["add", "second", "-p", "APM", "--priority", "high"]);
     env.json(&["comment", "APM-1", "hello"]);
     let conn = env.conn();
+    downgrade_to_v3(&conn);
     conn.execute_batch(
         "DROP INDEX items_claim_expires;
          ALTER TABLE items DROP COLUMN claim_expires;
@@ -410,7 +445,7 @@ fn v2_database_upgrades_to_v3() {
     let env = v2_env();
     let before = env.json(&["list"]);
     // Reading migrates; every task is as it was, with no claim.
-    assert_eq!(env.json(&["db"])["schema_version"], 3);
+    assert_eq!(env.json(&["db"])["schema_version"], 4);
     let after = env.json(&["list"]);
     assert_eq!(after, before);
     assert_eq!(after[0]["claim"], Value::Null);
@@ -426,4 +461,260 @@ fn v2_database_upgrades_to_v3() {
     assert_eq!(v["id"], "APM-2");
     assert_eq!(v["claim"]["by"], "tester");
     assert_eq!(env.json(&["show", "APM-1"])["comments"][0]["body"], "hello");
+}
+
+/// A database as apm v0.3 left it (schema v3): two projects, tasks, comments (one multi-line,
+/// one with non-ASCII text), no comment kinds, pages or FTS tables.
+fn v3_env() -> Env {
+    let env = Env::new();
+    env.json(&["project", "add", "APM", "Agent PM"]);
+    env.json(&["project", "add", "WEB", "web"]);
+    env.json(&["add", "first", "-p", "APM"]);
+    env.json(&["add", "second", "-p", "APM"]);
+    env.json(&["add", "web task", "-p", "WEB"]);
+    env.json(&[
+        "comment",
+        "APM-1",
+        "busy_timeout does not cover the WAL switch",
+    ]);
+    env.json(&[
+        "--as",
+        "bob",
+        "comment",
+        "APM-1",
+        "line one\nZEBRA line two",
+    ]);
+    env.json(&["comment", "APM-2", "Ünïcode Café note"]);
+    env.json(&["comment", "WEB-1", "zebra on the web"]);
+    let conn = env.conn();
+    downgrade_to_v3(&conn);
+    drop(conn);
+    // Really v3: no kind column, no FTS.
+    let raw = rusqlite::Connection::open(env.db_path()).unwrap();
+    assert_eq!(
+        raw.query_row(
+            "SELECT count(*) FROM pragma_table_info('comments') WHERE name IN ('kind', 'answers')",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    env
+}
+
+/// Raw connection that does not run apm (and so does not migrate).
+fn raw(env: &Env) -> rusqlite::Connection {
+    let conn = rusqlite::Connection::open(env.db_path()).unwrap();
+    conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+    conn
+}
+
+/// Row ids of comments whose index entry matches an FTS query (rows no longer in `comments`
+/// still show up here if the index kept them).
+fn fts_ids(conn: &rusqlite::Connection, table: &str, query: &str) -> Vec<i64> {
+    conn.prepare(&format!(
+        "SELECT rowid FROM {table} WHERE {table} MATCH ?1 ORDER BY rowid"
+    ))
+    .unwrap()
+    .query_map([query], |r| r.get(0))
+    .unwrap()
+    .collect::<rusqlite::Result<_>>()
+    .unwrap()
+}
+
+/// FTS5's own check that the index matches its content table exactly.
+fn fts_consistent(conn: &rusqlite::Connection, table: &str) {
+    conn.execute(
+        &format!("INSERT INTO {table} ({table}, rank) VALUES ('integrity-check', 1)"),
+        [],
+    )
+    .unwrap();
+}
+
+#[test]
+fn v3_database_upgrades_to_v4() {
+    let env = v3_env();
+    let before = env.json(&["show", "APM-1"]);
+    assert_eq!(env.json(&["db"])["schema_version"], 4);
+
+    // Every comment survives, unchanged, as a note answering nothing.
+    let after = env.json(&["show", "APM-1"]);
+    let comments = after["comments"].as_array().unwrap();
+    assert_eq!(comments.len(), 2);
+    for (old, new) in before["comments"].as_array().unwrap().iter().zip(comments) {
+        for field in ["id", "item", "author", "body", "created_at"] {
+            assert_eq!(old[field], new[field], "{field}");
+        }
+        assert_eq!(new["kind"], "note");
+        assert_eq!(new["answers"], Value::Null);
+    }
+    let conn = raw(&env);
+    assert_eq!(
+        count(
+            &env,
+            "SELECT count(*) FROM comments WHERE kind = 'note' AND answers IS NULL"
+        ),
+        4
+    );
+
+    // The old comments are in the full-text index: words, case and accents folded.
+    let id = |n: usize| comments[n]["id"].as_i64().unwrap();
+    assert_eq!(
+        fts_ids(&conn, "comments_fts", "\"wal\" \"switch\""),
+        [id(0)]
+    );
+    assert_eq!(fts_ids(&conn, "comments_fts", "busy"), [id(0)]);
+    assert_eq!(fts_ids(&conn, "comments_fts", "zebra").len(), 2);
+    assert_eq!(fts_ids(&conn, "comments_fts", "unicode cafe").len(), 1);
+    fts_consistent(&conn, "comments_fts");
+    fts_consistent(&conn, "pages_fts");
+
+    // New comments are indexed as they are written.
+    let v = env.json(&["comment", "APM-2", "quokka sighting"]);
+    assert_eq!(
+        fts_ids(&conn, "comments_fts", "quokka"),
+        [v["id"].as_i64().unwrap()]
+    );
+
+    // The new tables exist, start empty, and point where the plan says.
+    for table in ["pages", "page_versions", "page_links"] {
+        assert_eq!(count(&env, &format!("SELECT count(*) FROM {table}")), 0);
+    }
+    let fk = |table: &str| -> Vec<(String, String, String)> {
+        conn.prepare(&format!(
+            "SELECT \"from\", \"table\", on_delete FROM pragma_foreign_key_list('{table}')
+             ORDER BY \"from\""
+        ))
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+    };
+    let t = |a: &str, b: &str, c: &str| (a.to_string(), b.to_string(), c.to_string());
+    assert_eq!(
+        fk("comments"),
+        [
+            t("answers", "comments", "SET NULL"),
+            t("item_id", "items", "CASCADE")
+        ]
+    );
+    assert_eq!(fk("pages"), [t("project_id", "projects", "CASCADE")]);
+    assert_eq!(fk("page_versions"), [t("page_id", "pages", "CASCADE")]);
+    assert_eq!(
+        fk("page_links"),
+        [
+            t("item_id", "items", "CASCADE"),
+            t("page_id", "pages", "CASCADE")
+        ]
+    );
+    assert_eq!(
+        count(
+            &env,
+            "SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name IN
+             ('pages_fts_ai', 'pages_fts_ad', 'pages_fts_au',
+              'comments_fts_ai', 'comments_fts_ad', 'comments_fts_au')"
+        ),
+        6
+    );
+    // Slugs are stored lowercase.
+    assert!(
+        conn.execute(
+            "INSERT INTO pages (project_id, slug, title, created_by, updated_by)
+             VALUES ((SELECT id FROM projects WHERE key = 'APM'), 'Storage', 't', 'a', 'a')",
+            [],
+        )
+        .is_err()
+    );
+}
+
+/// A page of a project, with one version, linked to a task. S2 adds the commands; this
+/// writes what they will write.
+fn add_page(conn: &rusqlite::Connection, key: &str, slug: &str, body: &str, task: i64) {
+    conn.execute(
+        "INSERT INTO pages (project_id, slug, title, summary, body, created_by, updated_by)
+         VALUES ((SELECT id FROM projects WHERE key = ?1), ?2, ?2, 'gist', ?3, 'tester', 'tester')",
+        rusqlite::params![key, slug, body],
+    )
+    .unwrap();
+    let page = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO page_versions (page_id, version, title, summary, body, author)
+         VALUES (?1, 1, ?2, 'gist', ?3, 'tester')",
+        rusqlite::params![page, slug, body],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO page_links (page_id, item_id) VALUES (?1, ?2)",
+        rusqlite::params![page, task],
+    )
+    .unwrap();
+}
+
+#[test]
+fn v4_removals_leave_no_orphan_pages_or_index_rows() {
+    let env = v3_env();
+    env.json(&["db"]);
+    let conn = raw(&env);
+    // `show` has no row id: find tasks by title.
+    let task = |title: &str| -> i64 {
+        conn.query_row("SELECT id FROM items WHERE title = ?1", [title], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    };
+    let (first, second, web) = (task("first"), task("second"), task("web task"));
+    add_page(&conn, "APM", "storage", "aardvark storage notes", first);
+    add_page(&conn, "APM", "other", "aardvark elsewhere", second);
+    add_page(&conn, "WEB", "deploy", "aardvark deploys", web);
+    conn.execute(
+        "INSERT INTO page_links (page_id, item_id)
+         VALUES ((SELECT id FROM pages WHERE slug = 'storage'), ?1)",
+        [web],
+    )
+    .unwrap();
+    // A question and its answer on APM-1, to exercise the self-reference on delete.
+    let q = env.json(&["comment", "APM-1", "--kind", "question", "aardvark?"]);
+    let qid = q["id"].as_i64().unwrap().to_string();
+    env.json(&["comment", "APM-1", "--answer", &qid, "aardvark!"]);
+    assert_eq!(fts_ids(&conn, "pages_fts", "aardvark").len(), 3);
+    assert_eq!(fts_ids(&conn, "comments_fts", "aardvark").len(), 2);
+
+    // Task rm: its comments leave the index, its page links go, the pages stay.
+    env.json(&["rm", "APM-1"]);
+    assert!(fts_ids(&conn, "comments_fts", "aardvark").is_empty());
+    assert_eq!(fts_ids(&conn, "comments_fts", "zebra").len(), 1); // WEB-1's
+    assert_eq!(
+        count(
+            &env,
+            &format!("SELECT count(*) FROM page_links WHERE item_id = {first}")
+        ),
+        0
+    );
+    assert_eq!(count(&env, "SELECT count(*) FROM pages"), 3);
+    assert_eq!(count(&env, "SELECT count(*) FROM page_links"), 3);
+    fts_consistent(&conn, "comments_fts");
+
+    // Project rm: its pages, their versions, their links (also from other projects' tasks)
+    // and their index rows go; the other project's page stays.
+    env.json(&["project", "rm", "APM"]);
+    assert_eq!(count(&env, "SELECT count(*) FROM pages"), 1);
+    assert_eq!(count(&env, "SELECT count(*) FROM page_versions"), 1);
+    assert_eq!(count(&env, "SELECT count(*) FROM page_links"), 1);
+    assert_eq!(fts_ids(&conn, "pages_fts", "aardvark").len(), 1);
+    assert_eq!(fts_ids(&conn, "comments_fts", "unicode").len(), 0);
+    fts_consistent(&conn, "pages_fts");
+    fts_consistent(&conn, "comments_fts");
+
+    // Editing a page re-indexes it.
+    conn.execute("UPDATE pages SET body = 'pangolin deploys'", [])
+        .unwrap();
+    assert!(fts_ids(&conn, "pages_fts", "aardvark").is_empty());
+    assert_eq!(fts_ids(&conn, "pages_fts", "pangolin").len(), 1);
+    fts_consistent(&conn, "pages_fts");
+    assert_eq!(
+        count(&env, "SELECT count(*) FROM pragma_foreign_key_check"),
+        0
+    );
 }

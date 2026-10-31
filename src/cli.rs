@@ -29,7 +29,8 @@ pub struct Cli {
 
 impl Cli {
     /// Parse the process arguments, rejecting a flag right after `list --sort` (see
-    /// `item::flag_after_sort`) as clap would reject a missing value.
+    /// `item::flag_after_sort`) as clap would reject a missing value, and `comment --answer`
+    /// with another `--kind` (`comment::kind_conflict`) as clap rejects conflicting flags.
     pub fn parse_args() -> Result<Cli, clap::Error> {
         let args: Vec<String> = std::env::args_os()
             .map(|a| a.to_string_lossy().into_owned())
@@ -38,7 +39,13 @@ impl Cli {
             let msg = format!("--sort needs a value before {flag}");
             return Err(Cli::command().error(ErrorKind::InvalidValue, msg));
         }
-        Cli::try_parse_from(std::env::args_os())
+        let cli = Cli::try_parse_from(std::env::args_os())?;
+        if let Command::Comment(a) = &cli.command
+            && let Some(msg) = comment::kind_conflict(a)
+        {
+            return Err(Cli::command().error(ErrorKind::ArgumentConflict, msg));
+        }
+        Ok(cli)
     }
 }
 
@@ -82,7 +89,7 @@ pub enum Command {
     /// Manage a project's custom attributes
     #[command(subcommand)]
     Attr(attr::AttrCmd),
-    /// Add a comment to a task
+    /// Log on a task: a note, handoff, question or answer (--kind, --answer)
     Comment(comment::CommentArgs),
     /// Link two tasks: A blocks|relates|duplicates B
     Link(link::LinkArgs),

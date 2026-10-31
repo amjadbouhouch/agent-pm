@@ -266,6 +266,86 @@ ALTER TABLE items ADD COLUMN claimed_at TEXT;
 ALTER TABLE items ADD COLUMN claim_expires TEXT;
 CREATE INDEX items_claim_expires ON items(claim_expires);
 "#,
+    // v4: knowledge. Comment kinds (the task log), pages with versions and task links, full-text
+    // search. Only ADD COLUMN and CREATE: existing comments become notes and are indexed.
+    // The FTS tables are external-content, kept by triggers; FK cascades (task rm, project rm)
+    // fire the delete triggers too. A later migration that rebuilds `pages` or `comments` must
+    // drop and recreate these triggers and run the FTS 'rebuild' command.
+    r#"
+-- note|handoff|question|answer; checked in Rust, like events.kind.
+ALTER TABLE comments ADD COLUMN kind TEXT NOT NULL DEFAULT 'note';
+-- The question an answer answers (same task, checked in Rust).
+ALTER TABLE comments ADD COLUMN answers INTEGER REFERENCES comments(id) ON DELETE SET NULL;
+CREATE INDEX comments_answers ON comments(answers);
+
+CREATE TABLE pages (
+    id          INTEGER PRIMARY KEY,
+    project_id  INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    slug        TEXT NOT NULL CHECK (slug = lower(slug)),
+    title       TEXT NOT NULL,
+    summary     TEXT NOT NULL DEFAULT '',
+    body        TEXT NOT NULL DEFAULT '',
+    pinned      INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)),
+    version     INTEGER NOT NULL DEFAULT 1,
+    created_by  TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_by  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    verified_by TEXT,
+    verified_at TEXT,
+    UNIQUE (project_id, slug)
+);
+
+CREATE TABLE page_versions (
+    page_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+    version INTEGER NOT NULL,
+    title   TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    body    TEXT NOT NULL,
+    author  TEXT NOT NULL,
+    at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    PRIMARY KEY (page_id, version)
+);
+
+CREATE TABLE page_links (
+    page_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+    item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    PRIMARY KEY (page_id, item_id)
+);
+CREATE INDEX page_links_item ON page_links(item_id);
+
+CREATE VIRTUAL TABLE pages_fts USING fts5(
+    title, summary, body, content='pages', content_rowid='id'
+);
+CREATE TRIGGER pages_fts_ai AFTER INSERT ON pages BEGIN
+    INSERT INTO pages_fts (rowid, title, summary, body)
+        VALUES (new.id, new.title, new.summary, new.body);
+END;
+CREATE TRIGGER pages_fts_ad AFTER DELETE ON pages BEGIN
+    INSERT INTO pages_fts (pages_fts, rowid, title, summary, body)
+        VALUES ('delete', old.id, old.title, old.summary, old.body);
+END;
+CREATE TRIGGER pages_fts_au AFTER UPDATE OF title, summary, body ON pages BEGIN
+    INSERT INTO pages_fts (pages_fts, rowid, title, summary, body)
+        VALUES ('delete', old.id, old.title, old.summary, old.body);
+    INSERT INTO pages_fts (rowid, title, summary, body)
+        VALUES (new.id, new.title, new.summary, new.body);
+END;
+
+CREATE VIRTUAL TABLE comments_fts USING fts5(body, content='comments', content_rowid='id');
+CREATE TRIGGER comments_fts_ai AFTER INSERT ON comments BEGIN
+    INSERT INTO comments_fts (rowid, body) VALUES (new.id, new.body);
+END;
+CREATE TRIGGER comments_fts_ad AFTER DELETE ON comments BEGIN
+    INSERT INTO comments_fts (comments_fts, rowid, body) VALUES ('delete', old.id, old.body);
+END;
+-- Comments are never edited today; the trigger keeps the index right if they ever are.
+CREATE TRIGGER comments_fts_au AFTER UPDATE OF body ON comments BEGIN
+    INSERT INTO comments_fts (comments_fts, rowid, body) VALUES ('delete', old.id, old.body);
+    INSERT INTO comments_fts (rowid, body) VALUES (new.id, new.body);
+END;
+INSERT INTO comments_fts (comments_fts) VALUES ('rebuild');
+"#,
 ];
 
 pub fn schema_version(conn: &Connection) -> Result<i64> {
@@ -340,7 +420,8 @@ pub enum EventKind {
     /// A custom attribute changed; field = attribute name, old/new = stored values,
     /// None = unset.
     Attr,
-    /// A comment was added; new = its text.
+    /// A comment was added; field = its kind for anything but a note (`handoff`, `question`,
+    /// `answer`), None for a note; new = its text.
     Commented,
     /// The task moved to another project; old/new = its KEY-N before and after.
     Moved,
@@ -357,6 +438,10 @@ pub enum EventKind {
     Claimed,
     /// A live claim was dropped; field = why (`manual`, `done`, `stolen`), old = its holder.
     Released,
+    /// A page was linked to the task; new = the page's `KEY:slug`.
+    Paged,
+    /// A page was unlinked from the task; old = the page's `KEY:slug`.
+    Unpaged,
 }
 
 impl EventKind {
@@ -381,6 +466,8 @@ impl EventKind {
             EventKind::Untagged => "untagged",
             EventKind::Claimed => "claimed",
             EventKind::Released => "released",
+            EventKind::Paged => "paged",
+            EventKind::Unpaged => "unpaged",
         }
     }
 }
@@ -522,6 +609,36 @@ pub fn parse_item_key(s: &str) -> Result<(String, i64)> {
     Ok((key, n))
 }
 
+/// Validate a page slug (1-40 of `a-z 0-9 -`, starting with a letter or digit); returns it
+/// lowercased.
+#[allow(dead_code)] // page commands (S2) and import (S3)
+pub fn check_slug(slug: &str) -> Result<String> {
+    let ok = (1..=40).contains(&slug.len())
+        && slug.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    if !ok {
+        return Err(err(format!(
+            "invalid page slug `{slug}`: 1-40 letters, digits or hyphens, starting with a letter or digit"
+        )));
+    }
+    Ok(slug.to_lowercase())
+}
+
+/// Split a page id `APM:storage` into (`APM`, `storage`), key uppercased and slug lowercased.
+/// The key is not looked up: it may be an alias (`project_id` resolves it).
+#[allow(dead_code)] // page commands (S2)
+pub fn parse_page_ref(s: &str) -> Result<(String, String)> {
+    let bad = || {
+        err(format!(
+            "invalid page reference `{s}`, expected KEY:slug like APM:storage"
+        ))
+    };
+    let (key, slug) = s.split_once(':').ok_or_else(bad)?;
+    let key = check_project_key(key).map_err(|_| bad())?;
+    let slug = check_slug(slug).map_err(|_| bad())?;
+    Ok((key, slug))
+}
+
 /// Resolve `KEY-N` to an item. The key may be an alias, and `N` a number the task had before
 /// it moved (`item_aliases`); either way the result is the task where it is now. Numbers are
 /// never reused, so a live number and an alias never collide.
@@ -569,6 +686,42 @@ mod tests {
         assert!(parse_item_key("APM").is_err());
         assert!(parse_item_key("APM-0").is_err());
         assert!(parse_item_key("-3").is_err());
+    }
+
+    #[test]
+    fn slugs() {
+        assert_eq!(check_slug("Storage").unwrap(), "storage");
+        assert_eq!(check_slug("wal-2").unwrap(), "wal-2");
+        assert_eq!(check_slug("9lives").unwrap(), "9lives");
+        assert_eq!(check_slug(&"a".repeat(40)).unwrap(), "a".repeat(40));
+        assert!(check_slug(&"a".repeat(41)).is_err());
+        assert!(check_slug("").is_err());
+        assert!(check_slug("-wal").is_err());
+        assert!(check_slug("wal_mode").is_err());
+        assert!(check_slug("wal mode").is_err());
+        assert!(check_slug("caf\u{e9}").is_err());
+        assert_eq!(
+            check_slug("a/b").unwrap_err().to_string(),
+            "invalid page slug `a/b`: 1-40 letters, digits or hyphens, starting with a letter or digit"
+        );
+    }
+
+    #[test]
+    fn page_refs() {
+        let r = |k: &str, s: &str| (k.to_string(), s.to_string());
+        assert_eq!(parse_page_ref("apm:Storage").unwrap(), r("APM", "storage"));
+        assert_eq!(
+            parse_page_ref("APM2:wal-mode").unwrap(),
+            r("APM2", "wal-mode")
+        );
+        for bad in [
+            "APM", "APM:", ":storage", "APM-3", "2APM:x", "APM:-x", "APM:a:b", "A-B:x",
+        ] {
+            assert_eq!(
+                parse_page_ref(bad).unwrap_err().to_string(),
+                format!("invalid page reference `{bad}`, expected KEY:slug like APM:storage")
+            );
+        }
     }
 
     #[test]

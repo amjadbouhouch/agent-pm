@@ -16,6 +16,8 @@ fn comment_returns_the_comment() {
     assert!(v["id"].is_i64());
     assert_eq!(v["item"], "APM-1");
     assert_eq!(v["author"], "tester");
+    assert_eq!(v["kind"], "note");
+    assert_eq!(v["answers"], serde_json::Value::Null);
     assert_eq!(v["body"], "looks good");
     assert!(v["created_at"].is_string());
 
@@ -137,4 +139,243 @@ fn comment_input_errors() {
         env.json(&["show", "APM-1"])["comments"],
         serde_json::json!([])
     );
+}
+
+/// Project APM with tasks APM-1 and APM-2, a question on each; returns their ids.
+fn seed_questions(env: &Env) -> (i64, i64) {
+    seed(env);
+    env.json(&["add", "other task", "-p", "APM"]);
+    let q1 = env.json(&["comment", "APM-1", "--kind", "question", "WAL on NFS?"]);
+    let q2 = env.json(&["comment", "APM-2", "--kind", "question", "retry too?"]);
+    (q1["id"].as_i64().unwrap(), q2["id"].as_i64().unwrap())
+}
+
+#[test]
+fn comment_kinds() {
+    let env = Env::new();
+    let (q, _) = seed_questions(&env);
+    let h = env.json_stdin(
+        &["comment", "APM-1", "--kind", "handoff", "-"],
+        "State: done\nNext: test\n",
+    );
+    assert_eq!(h["kind"], "handoff");
+    assert_eq!(h["answers"], serde_json::Value::Null);
+    assert_eq!(h["body"], "State: done\nNext: test");
+    let n = env.json(&["comment", "APM-1", "--kind", "note", "plain"]);
+    assert_eq!(n["kind"], "note");
+
+    // --answer implies the kind; --kind answer with it says the same.
+    let q = q.to_string();
+    let a = env.json(&["--as", "bob", "comment", "APM-1", "--answer", &q, "no"]);
+    assert_eq!(a["kind"], "answer");
+    assert_eq!(a["answers"], q.parse::<i64>().unwrap());
+    assert_eq!(a["author"], "bob");
+    let a2 = env.json(&[
+        "comment", "apm-1", "--kind", "answer", "--answer", &q, "agreed",
+    ]);
+    assert_eq!(a2["kind"], "answer");
+    // A question may get several answers.
+    assert_eq!(a2["answers"], a["answers"]);
+    // `#N`, as show and `asked on` print it, works like N.
+    let a3 = env.json(&["comment", "APM-1", "--answer", &format!("#{q}"), "same"]);
+    assert_eq!(a3["answers"], a["answers"]);
+
+    // show returns the same objects, oldest first.
+    let comments = env.json(&["show", "APM-1"])["comments"].clone();
+    let kinds: Vec<&str> = comments
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["question", "handoff", "note", "answer", "answer", "answer"]
+    );
+    assert_eq!(comments[3], a);
+}
+
+#[test]
+fn comment_kind_text_output() {
+    let env = Env::new();
+    let (q, _) = seed_questions(&env);
+    let run = |args: &[&str], out: String| {
+        env.apm().args(args).assert().success().stdout(out);
+    };
+    run(
+        &["comment", "APM-1", "--kind", "handoff", "h"],
+        "handoff on APM-1\n".into(),
+    );
+    run(
+        &["comment", "APM-1", "--kind", "note", "n"],
+        "commented on APM-1\n".into(),
+    );
+    run(
+        &["comment", "APM-1", "--kind", "question", "?"],
+        format!("asked on APM-1 (#{})\n", q + 4),
+    );
+    run(
+        &["comment", "APM-1", "--answer", &q.to_string(), "a"],
+        format!("answered #{q} on APM-1\n"),
+    );
+    run(
+        &["comment", "APM-1", "--answer", &format!("#{q}"), "b"],
+        format!("answered #{q} on APM-1\n"),
+    );
+}
+
+#[test]
+fn show_marks_log_kinds() {
+    let env = Env::new();
+    let (q, _) = seed_questions(&env);
+    env.json(&["comment", "APM-1", "a note"]);
+    env.json(&["comment", "APM-1", "--kind", "handoff", "State: x\nNext: y"]);
+    env.json(&["comment", "APM-1", "--answer", &q.to_string(), "yes"]);
+    let out = env.apm().args(["show", "APM-1"]).assert().success();
+    let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let log: Vec<String> = text
+        .split("\ncomments:\n")
+        .nth(1)
+        .unwrap()
+        .lines()
+        .map(|l| {
+            // Drop the timestamp: `  <time> <rest>`.
+            let l = l.trim_start();
+            match l.split_once(' ') {
+                Some((t, rest)) if t.ends_with('Z') => rest.to_string(),
+                _ => l.to_string(),
+            }
+        })
+        .collect();
+    assert_eq!(
+        log,
+        [
+            format!("tester [question #{q}]: WAL on NFS?"),
+            "tester: a note".to_string(),
+            "tester [handoff]: State: x".to_string(),
+            "Next: y".to_string(),
+            format!("tester [answer #{q}]: yes"),
+        ]
+    );
+}
+
+#[test]
+fn answer_errors() {
+    let env = Env::new();
+    let (q1, q2) = seed_questions(&env);
+    let note = env.json(&["comment", "APM-1", "a note"])["id"]
+        .as_i64()
+        .unwrap();
+    let handoff = env.json(&["comment", "APM-1", "--kind", "handoff", "h"])["id"]
+        .as_i64()
+        .unwrap();
+    let answer = env.json(&["comment", "APM-1", "--answer", &q1.to_string(), "a"])["id"]
+        .as_i64()
+        .unwrap();
+    let before = env.json(&["show", "APM-1"])["comments"].clone();
+    let ans =
+        |task: &str, id: i64| env.json_err(&["comment", task, "--answer", &id.to_string(), "x"]);
+
+    assert_eq!(
+        ans("APM-1", note),
+        format!("comment #{note} is not a question (it is a note)")
+    );
+    assert_eq!(
+        ans("APM-1", handoff),
+        format!("comment #{handoff} is not a question (it is a handoff)")
+    );
+    assert_eq!(
+        ans("APM-1", answer),
+        format!("comment #{answer} is not a question (it is an answer)")
+    );
+    assert_eq!(
+        ans("APM-1", q2),
+        format!("comment #{q2} is on APM-2, not APM-1; answer it there")
+    );
+    assert_eq!(ans("APM-1", 999), "no such comment: #999");
+    assert_eq!(ans("APM-9", q1), "no such item: APM-9");
+    // Usage errors (exit 2, `{"error": ...}` under --json): --answer with another kind;
+    // --kind answer without --answer; unknown kinds; a malformed id.
+    let q = q1.to_string();
+    let usage = |args: &[&str]| -> String {
+        let out = env.apm().arg("--json").args(args).assert().code(2);
+        let v: serde_json::Value = serde_json::from_slice(&out.get_output().stderr).unwrap();
+        v["error"].as_str().unwrap().to_string()
+    };
+    for kind in ["handoff", "question", "note"] {
+        assert_eq!(
+            usage(&["comment", "APM-1", "--kind", kind, "--answer", &q, "x"]),
+            format!("--answer makes the comment an answer, not a {kind}; drop --kind")
+        );
+    }
+    let out = env
+        .apm()
+        .args(["comment", "APM-1", "--kind", "handoff", "--answer", &q, "x"])
+        .assert()
+        .code(2);
+    assert!(
+        String::from_utf8_lossy(&out.get_output().stderr).starts_with(
+            "error: --answer makes the comment an answer, not a handoff; drop --kind\n"
+        )
+    );
+    usage(&["comment", "APM-1", "--kind", "answer", "x"]);
+    usage(&["comment", "APM-1", "--kind", "todo", "x"]);
+    for id in ["##3", "#", "3a", "0"] {
+        assert!(
+            usage(&["comment", "APM-1", "--answer", id, "x"])
+                .contains("expected a comment id like 41 or #41"),
+            "{id}"
+        );
+    }
+    env.apm()
+        .args(["comment", "APM-1", "--answer", "999", "x"])
+        .assert()
+        .code(1)
+        .stderr("error: no such comment: #999\n");
+    // Nothing was written.
+    assert_eq!(env.json(&["show", "APM-1"])["comments"], before);
+}
+
+#[test]
+fn comment_events_record_the_kind() {
+    let env = Env::new();
+    let (q, _) = seed_questions(&env);
+    env.json(&["comment", "APM-1", "plain"]);
+    env.json(&["comment", "APM-1", "--answer", &q.to_string(), "yes"]);
+    env.json(&["comment", "APM-1", "--kind", "handoff", "bye"]);
+    let events: Vec<(serde_json::Value, serde_json::Value)> = env
+        .json(&["history", "APM-1"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "commented")
+        .map(|e| (e["field"].clone(), e["new"].clone()))
+        .collect();
+    let s = |v: &str| serde_json::Value::from(v);
+    let null = serde_json::Value::Null;
+    assert_eq!(
+        events,
+        [
+            (s("question"), s("WAL on NFS?")),
+            (null, s("plain")),
+            (s("answer"), s("yes")),
+            (s("handoff"), s("bye")),
+        ]
+    );
+}
+
+#[test]
+fn comment_help_says_what_each_kind_is_for() {
+    let env = Env::new();
+    let out = env.apm().args(["comment", "--help"]).assert().success();
+    let help = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    for line in [
+        "What the next agent needs to pick this task up: state, next steps",
+        "Something you could not settle; it stays open until someone answers it",
+        "The answer to a question on this task",
+        "--answer <ID>",
+        "`41` or `#41` as `show` prints it",
+    ] {
+        assert!(help.contains(line), "{line} not in:\n{help}");
+    }
 }
