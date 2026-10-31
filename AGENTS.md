@@ -127,8 +127,8 @@ Values are as stored (`yes` is `"true"`, dates in UTC). A comment's `kind` is a
 `CommentKind`; an answer's `answers` is the 1-based position of its question in the same
 task's `comments` (files have no comment ids). A page's last version is its current content.
 Import re-validates everything as the commands would (event and comment kinds must be known,
-`answers` must point to an earlier question, slugs and summary length as `apm page` checks
-them, versions run 1 to `version` with no gap), keeps `KEY-N`, `KEY:slug`, timestamps and
+`answers` must point to an earlier question, slugs and every version's title and summary
+as `apm page` checks them, versions run 1 to `version` with no gap), keeps `KEY-N`, `KEY:slug`, timestamps and
 actors, and writes in one transaction (the FTS triggers index pages and comments); imported
 tasks start unclaimed. `--key NEW` renames the project's task and page ids alike.
 

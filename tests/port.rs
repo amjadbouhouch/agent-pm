@@ -1172,7 +1172,7 @@ fn import_rejects_broken_pages_and_answers() {
                 page(v)["summary"] = s.clone().into();
                 page(v)["versions"][1]["summary"] = s.into();
             },
-            "page APM:notes: summary is 201 characters, the limit is 200",
+            "page APM:notes: summary is 201 characters, at most 200: put detail in the body",
         ),
         (
             &|v| page(v)["versions"][0]["summary"] = "y".repeat(201).into(),
@@ -1181,6 +1181,29 @@ fn import_rejects_broken_pages_and_answers() {
         (
             &|v| page(v)["title"] = " ".into(),
             "page APM:notes: title cannot be empty",
+        ),
+        // The same content rules as `apm page`: one-line title and summary.
+        (
+            &|v| {
+                page(v)["title"] = "Notes\nmore".into();
+                page(v)["versions"][1]["title"] = "Notes\nmore".into();
+            },
+            "page APM:notes: title must be one line",
+        ),
+        (
+            &|v| {
+                page(v)["summary"] = "short\nmore".into();
+                page(v)["versions"][1]["summary"] = "short\nmore".into();
+            },
+            "page APM:notes: summary must be one line: put detail in the body",
+        ),
+        (
+            &|v| page(v)["versions"][0]["title"] = "Notes\r\nold".into(),
+            "page APM:notes: version 1: title must be one line",
+        ),
+        (
+            &|v| page(v)["versions"][0]["summary"] = "old\nsummary".into(),
+            "page APM:notes: version 1: summary must be one line",
         ),
         (
             &|v| {

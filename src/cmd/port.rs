@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use super::attr::{self, AttrType};
 use super::link::{self, LinkKind};
-use super::{Ctx, milestone, status, tag};
+use super::{Ctx, milestone, page, status, tag};
 use crate::error::{AppError, Result, err};
 use crate::model::{self, Category, CommentKind, Priority, When};
 use crate::{db, input, output};
@@ -20,9 +20,6 @@ use crate::{db, input, output};
 /// The export format this apm writes (`apm_export`). Bump it on any change to the shape
 /// below, and keep reading the old ones (`parse`): 1 had no log kinds, pages or page links.
 const VERSION: i64 = 2;
-
-/// The longest page summary, in characters (as `apm page` allows).
-const SUMMARY_MAX: usize = 200;
 
 #[derive(Args, Debug)]
 pub struct ExportArgs {
@@ -1004,7 +1001,7 @@ fn check_page(page: &Page) -> Result<()> {
     if db::check_slug(&page.slug)? != page.slug {
         return Err(err(format!("page slug must be lowercase: {}", page.slug)));
     }
-    check_content(&page.title, &page.summary)?;
+    page::check_content(Some(&page.title), Some(&page.summary))?;
     for t in [&page.created_at, &page.updated_at] {
         check_time(t)?;
     }
@@ -1025,7 +1022,7 @@ fn check_page(page: &Page) -> Result<()> {
             )));
         }
         let at = |e: AppError| err(format!("version {want}: {e}"));
-        check_content(&v.title, &v.summary).map_err(at)?;
+        page::check_content(Some(&v.title), Some(&v.summary)).map_err(at)?;
         check_time(&v.at).map_err(at)?;
     }
     if page.versions.len() as i64 != page.version {
@@ -1040,20 +1037,6 @@ fn check_page(page: &Page) -> Result<()> {
         return Err(err(format!(
             "version {} differs from the page's title, summary or body",
             page.version
-        )));
-    }
-    Ok(())
-}
-
-/// A page's (or page version's) title and summary.
-fn check_content(title: &str, summary: &str) -> Result<()> {
-    if title.trim().is_empty() {
-        return Err(err("title cannot be empty"));
-    }
-    let n = summary.chars().count();
-    if n > SUMMARY_MAX {
-        return Err(err(format!(
-            "summary is {n} characters, the limit is {SUMMARY_MAX}"
         )));
     }
     Ok(())
