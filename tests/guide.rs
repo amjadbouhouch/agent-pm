@@ -39,8 +39,9 @@ fn guide_mentions_every_command() {
 #[test]
 fn guide_is_compact() {
     let env = Env::new();
-    // Compact enough to read in one go; v2 (statuses, links, tags, history, move) needs ~100.
-    assert!(guide_text(&env).lines().count() <= 120);
+    // Compact enough to read in one go; v2 (statuses, links, tags, history, move) needed
+    // ~100, v4 (context, log kinds, pages, search) needs 142.
+    assert!(guide_text(&env).lines().count() <= 150);
 }
 
 #[test]
@@ -49,4 +50,44 @@ fn guide_json() {
     let v = env.json(&["guide"]);
     assert_eq!(v["guide"].as_str().unwrap(), guide_text(&env));
     assert!(!env.db_path().exists());
+}
+
+#[test]
+fn guide_agents_snippet() {
+    let env = Env::new();
+    let out = env.apm().args(["guide", "--agents"]).assert().success();
+    let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(lines.len() <= 10, "{text}");
+    assert!(lines[0].starts_with("## "));
+    for needle in [
+        "apm context -p KEY --json",
+        "apm context KEY-N --json",
+        "--kind handoff -",
+        "--kind question",
+        "apm page add",
+        "apm search",
+        "APM_AGENT",
+    ] {
+        assert!(text.contains(needle), "{needle} not in:\n{text}");
+    }
+    assert!(text.is_ascii());
+    assert_eq!(env.json(&["guide", "--agents"])["agents"], text);
+    assert!(!env.db_path().exists());
+}
+
+#[test]
+fn guide_has_a_knowledge_section() {
+    let env = Env::new();
+    let text = guide_text(&env);
+    assert!(text.contains("\nKNOWLEDGE "));
+    assert!(text.contains("\n  Every command has --help.\n"));
+    for needle in [
+        "apm context -p APM",
+        "--kind handoff",
+        "--answer",
+        "apm page verify",
+    ] {
+        assert!(text.contains(needle), "{needle}");
+    }
 }

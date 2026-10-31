@@ -7,7 +7,7 @@ use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
-use super::{Ctx, item, link, status, tag};
+use super::{Ctx, context, item, link, status, tag};
 use crate::db::{self, EventKind};
 use crate::error::{Result, err};
 use crate::model::{Category, parse_ttl};
@@ -74,6 +74,9 @@ pub struct Claim {
 struct Next {
     task: Option<item::Item>,
     renewed: bool,
+    /// Only with `--context`: the task's context, null when nothing is ready.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<Option<context::TaskContext>>,
 }
 
 #[derive(Args, Debug)]
@@ -110,6 +113,10 @@ pub struct NextArgs {
     /// How long the claim lasts: <n>m, <n>h or <n>d, 1m to 7d
     #[arg(long, default_value = "2h", value_parser = parse_ttl)]
     pub ttl: i64,
+    /// Also print the claimed task's context (as `apm context KEY-N`): claim and catch up in
+    /// one call
+    #[arg(long)]
+    pub context: bool,
 }
 
 #[derive(Args, Debug)]
@@ -168,6 +175,7 @@ pub fn next(ctx: &Ctx, args: NextArgs) -> Result<i32> {
         let none = Next {
             task: None,
             renewed: false,
+            context: args.context.then_some(None),
         };
         output::written(ctx.json, &none, "nothing ready")?;
         return Ok(NOTHING_READY);
@@ -212,11 +220,26 @@ pub fn next(ctx: &Ctx, args: NextArgs) -> Result<i32> {
     let item = item::get(&ctx.conn, r.id)?;
     let verb = if renewed { "renewed" } else { "claimed" };
     let line = format!("{verb} {} until {expires}: {}", item.id, item.title);
+    let id = item.id.clone();
+    let context = args
+        .context
+        .then(|| context::for_task(&ctx.conn, r.id, context::DEFAULT_LOG))
+        .transpose()?;
+    let text = match &context {
+        None => format!("{line}\ncontext: apm context {id}"),
+        Some(_) => line,
+    };
     let next = Next {
         task: Some(item),
         renewed,
+        context: context.map(Some),
     };
-    output::written(ctx.json, &next, &line)?;
+    if ctx.json || next.context.is_none() {
+        output::written(ctx.json, &next, &text)?;
+    } else if let Some(Some(c)) = &next.context {
+        println!("{text}\n");
+        context::print_task(c);
+    }
     Ok(0)
 }
 
@@ -353,6 +376,18 @@ fn live_holder(conn: &Connection, item_id: i64) -> Result<Option<String>> {
             |r| r.get(0),
         )
         .optional()?)
+}
+
+/// The tasks `actor` holds a live claim on, as (row id, KEY-N), by key and number.
+pub fn live_claims(conn: &Connection, actor: &str) -> Result<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT i.id, p.key || '-' || i.seq FROM items i
+         JOIN statuses s ON s.id = i.status_id JOIN projects p ON p.id = i.project_id
+         WHERE {} AND i.claimed_by = ?1 ORDER BY p.key, i.seq",
+        live()
+    ))?;
+    let rows = stmt.query_map(params![actor], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 /// Clear a claim and record `released` with its reason; old = the holder.

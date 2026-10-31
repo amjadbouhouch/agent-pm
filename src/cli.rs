@@ -4,7 +4,8 @@ use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser, Subcommand};
 
 use crate::cmd::{
-    attr, claim, comment, history, item, link, milestone, mv, page, port, project, status, tag,
+    attr, claim, comment, context, guide, history, item, link, milestone, mv, page, port, project,
+    status, tag,
 };
 
 /// agent-pm: a small project tracker for agents and humans.
@@ -91,6 +92,8 @@ pub enum Command {
     Attr(attr::AttrCmd),
     /// Log on a task: a note, handoff, question or answer (--kind, --answer)
     Comment(comment::CommentArgs),
+    /// START HERE: what earlier agents learned about a task (or -p KEY: a project), in one call
+    Context(context::ContextArgs),
     /// Pages: knowledge that outlives a task (decisions + why, architecture, conventions)
     #[command(subcommand)]
     Page(page::PageCmd),
@@ -110,8 +113,8 @@ pub enum Command {
     Import(port::ImportArgs),
     /// Copy the whole database to a backup file
     Backup(port::BackupArgs),
-    /// Print a compact usage guide for agents
-    Guide,
+    /// Print a compact usage guide for agents (--agents: lines for AGENTS.md / CLAUDE.md)
+    Guide(guide::GuideArgs),
     /// Show the database path and schema version
     Db,
 }

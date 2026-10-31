@@ -873,7 +873,6 @@ pub fn search(ctx: &Ctx, args: SearchArgs) -> Result<()> {
 /// The pages `apm context KEY-N` shows: those linked to the task or one of its parents
 /// (`linked`), then the pinned pages of its project; plus how many other pages that project
 /// has.
-#[allow(dead_code)] // `apm context` (S4)
 pub fn for_context(conn: &Connection, item_id: i64) -> Result<(Vec<PageSummary>, i64)> {
     let up = "WITH RECURSIVE up(id) AS (
                   SELECT ?1 UNION SELECT i.parent_id FROM items i JOIN up ON i.id = up.id
@@ -918,7 +917,6 @@ pub fn for_context(conn: &Connection, item_id: i64) -> Result<(Vec<PageSummary>,
 
 /// The pages `apm context -p KEY` shows: the project's pinned pages, plus how many other
 /// pages it has.
-#[allow(dead_code)] // `apm context -p` (S4)
 pub fn for_project(conn: &Connection, project_id: i64) -> Result<(Vec<PageSummary>, i64)> {
     let mut pages = summaries(conn, "p.project_id = ?1 AND p.pinned", &[&project_id])?;
     for p in &mut pages {

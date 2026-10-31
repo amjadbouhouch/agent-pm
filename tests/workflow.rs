@@ -736,9 +736,26 @@ fn text_output_is_ascii() {
         &["search", "\"(-:*"],
         &["page", "edit", "APM:storage", "--rename", "disk"],
         &["page", "edit", "APM:disk", "--pin"],
+        &["add", "knowledge", "-p", "APM", "-b", "what we know"],
+        &["comment", "APM-4", "--kind", "question", "WAL on NFS?"],
+        &["comment", "APM-4", "--kind", "handoff", "State: x\nNext: y"],
+        &["page", "edit", "APM:disk", "--link", "APM-4"],
+        &["context", "APM-4"],
+        &["context", "APM-4", "--log", "1"],
+        &["context", "-p", "APM"],
+        &["context", "-p", "INFRA"],
+        &["claim", "APM-4"],
+        &["context"],
+        &["release", "APM-4"],
+        &["next", "-p", "APM"],
+        &["next", "-p", "APM", "--context"],
+        &["done", "APM-4"],
+        &["add", "quiet", "-p", "APM"],
+        &["done", "APM-5"],
         &["page", "rm", "APM:disk"],
         &["db"],
         &["guide"],
+        &["guide", "--agents"],
     ];
     // Errors print on stderr.
     let errors: &[&[&str]] = &[
@@ -761,6 +778,8 @@ fn text_output_is_ascii() {
             "--expect-version",
             "1",
         ],
+        &["context", "--as", "nobody"],
+        &["context", "APM-99"],
     ];
     let mut out = String::new();
     for (args, ok) in story
@@ -782,6 +801,11 @@ fn text_output_is_ascii() {
     assert!(out.contains("APM-1 -> OPS-1"), "the story ran: {out}");
     assert!(out.contains("APM:storage  Storage"), "pages ran: {out}");
     assert!(out.contains("[line]"), "search ran: {out}");
+    assert!(out.contains("\nhints:\n"), "context ran: {out}");
+    assert!(
+        out.contains("hint: APM-5 has an empty log"),
+        "done hinted: {out}"
+    );
     assert!(
         out.contains(
             "

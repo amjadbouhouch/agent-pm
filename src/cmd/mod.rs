@@ -3,6 +3,7 @@
 pub mod attr;
 pub mod claim;
 pub mod comment;
+pub mod context;
 pub mod db;
 pub mod guide;
 pub mod history;
@@ -31,8 +32,8 @@ pub struct Ctx {
 
 /// Run a command; returns the exit code for a success (0, or 3 from `next`).
 pub fn run(cli: Cli) -> Result<i32> {
-    if let Command::Guide = cli.command {
-        return guide::run(cli.json).map(|()| 0);
+    if let Command::Guide(a) = &cli.command {
+        return guide::run(cli.json, a).map(|()| 0);
     }
     let path = crate::db::path(cli.db.as_deref())?;
     let ctx = Ctx {
@@ -59,6 +60,7 @@ pub fn run(cli: Cli) -> Result<i32> {
         Command::Status(c) => status::run(&ctx, c),
         Command::Attr(c) => attr::run(&ctx, c),
         Command::Comment(a) => comment::run(&ctx, a),
+        Command::Context(a) => context::run(&ctx, a),
         Command::Page(c) => page::run(&ctx, c),
         Command::Search(a) => page::search(&ctx, a),
         Command::Link(a) => link::link(&ctx, a),
@@ -69,7 +71,7 @@ pub fn run(cli: Cli) -> Result<i32> {
         Command::Import(a) => port::import(&ctx, a),
         Command::Backup(a) => port::backup(&ctx, &path, a),
         Command::Db => db::run(&ctx, &path),
-        Command::Guide => unreachable!("handled before opening the database"),
+        Command::Guide(_) => unreachable!("handled before opening the database"),
     };
     done.map(|()| 0)
 }

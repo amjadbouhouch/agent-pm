@@ -661,13 +661,26 @@ pub fn set_status(ctx: &Ctx, args: KeyArg, shortcut: Shortcut) -> Result<()> {
     record_changes(&tx, &ctx.actor, &before, &snapshot(&tx, item.id)?)?;
     claim::release_if_closed(&tx, &ctx.actor, item.id)?;
     let verb = touch_if_changed(&tx, &before)?;
+    // A hint, not a rule: closing a task with nothing in its log (text mode only, on stderr).
+    let hint = matches!(shortcut, Shortcut::Done)
+        && verb == "updated"
+        && !ctx.json
+        && !comment::any(&tx, item.id)?;
     tx.commit()?;
     let item = get(&ctx.conn, item.id)?;
     output::written(
         ctx.json,
         &item,
         &format!("{verb} {} ({})", item.id, item.status),
-    )
+    )?;
+    if hint {
+        eprintln!(
+            "hint: {} has an empty log; leave what the next agent should know: \
+             apm comment {} --kind handoff -",
+            item.id, item.id
+        );
+    }
+    Ok(())
 }
 
 pub fn rm(ctx: &Ctx, args: KeyArg) -> Result<()> {
