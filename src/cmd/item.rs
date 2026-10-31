@@ -661,11 +661,11 @@ pub fn set_status(ctx: &Ctx, args: KeyArg, shortcut: Shortcut) -> Result<()> {
     record_changes(&tx, &ctx.actor, &before, &snapshot(&tx, item.id)?)?;
     claim::release_if_closed(&tx, &ctx.actor, item.id)?;
     let verb = touch_if_changed(&tx, &before)?;
-    let empty_log: bool = tx.query_row(
-        "SELECT NOT EXISTS (SELECT 1 FROM comments WHERE item_id = ?1)",
-        params![item.id],
-        |r| r.get(0),
-    )?;
+    // A hint, not a rule: closing a task with nothing in its log (text mode only, on stderr).
+    let hint = matches!(shortcut, Shortcut::Done)
+        && verb == "updated"
+        && !ctx.json
+        && !comment::any(&tx, item.id)?;
     tx.commit()?;
     let item = get(&ctx.conn, item.id)?;
     output::written(
@@ -673,8 +673,7 @@ pub fn set_status(ctx: &Ctx, args: KeyArg, shortcut: Shortcut) -> Result<()> {
         &item,
         &format!("{verb} {} ({})", item.id, item.status),
     )?;
-    // A hint, not a rule: text mode only, on stderr, never a failure.
-    if matches!(shortcut, Shortcut::Done) && empty_log && !ctx.json {
+    if hint {
         eprintln!(
             "hint: {} has an empty log; leave what the next agent should know: \
              apm comment {} --kind handoff -",

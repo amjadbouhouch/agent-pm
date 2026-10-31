@@ -74,6 +74,9 @@ pub struct Claim {
 struct Next {
     task: Option<item::Item>,
     renewed: bool,
+    /// Only with `--context`: the task's context, null when nothing is ready.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<Option<context::TaskContext>>,
 }
 
 #[derive(Args, Debug)]
@@ -172,12 +175,9 @@ pub fn next(ctx: &Ctx, args: NextArgs) -> Result<i32> {
         let none = Next {
             task: None,
             renewed: false,
+            context: args.context.then_some(None),
         };
-        let mut v = serde_json::to_value(&none)?;
-        if args.context {
-            v["context"] = serde_json::Value::Null;
-        }
-        output::written(ctx.json, &v, "nothing ready")?;
+        output::written(ctx.json, &none, "nothing ready")?;
         return Ok(NOTHING_READY);
     };
     let before = item::get(&tx, r.id)?;
@@ -220,28 +220,25 @@ pub fn next(ctx: &Ctx, args: NextArgs) -> Result<i32> {
     let item = item::get(&ctx.conn, r.id)?;
     let verb = if renewed { "renewed" } else { "claimed" };
     let line = format!("{verb} {} until {expires}: {}", item.id, item.title);
-    let row_id = item.row_id;
     let id = item.id.clone();
+    let context = args
+        .context
+        .then(|| context::for_task(&ctx.conn, r.id, context::DEFAULT_LOG))
+        .transpose()?;
+    let text = match &context {
+        None => format!("{line}\ncontext: apm context {id}"),
+        Some(_) => line,
+    };
     let next = Next {
         task: Some(item),
         renewed,
+        context: context.map(Some),
     };
-    if !args.context {
-        output::written(
-            ctx.json,
-            &next,
-            &format!("{line}\ncontext: apm context {id}"),
-        )?;
-        return Ok(0);
-    }
-    let c = context::for_task(&ctx.conn, row_id, context::DEFAULT_LOG)?;
-    if ctx.json {
-        let mut v = serde_json::to_value(&next)?;
-        v["context"] = serde_json::to_value(&c)?;
-        output::json(&v)?;
-    } else {
-        println!("{line}\n");
-        context::print_task(&c);
+    if ctx.json || next.context.is_none() {
+        output::written(ctx.json, &next, &text)?;
+    } else if let Some(Some(c)) = &next.context {
+        println!("{text}\n");
+        context::print_task(c);
     }
     Ok(0)
 }
@@ -379,6 +376,18 @@ fn live_holder(conn: &Connection, item_id: i64) -> Result<Option<String>> {
             |r| r.get(0),
         )
         .optional()?)
+}
+
+/// The tasks `actor` holds a live claim on, as (row id, KEY-N), by key and number.
+pub fn live_claims(conn: &Connection, actor: &str) -> Result<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT i.id, p.key || '-' || i.seq FROM items i
+         JOIN statuses s ON s.id = i.status_id JOIN projects p ON p.id = i.project_id
+         WHERE {} AND i.claimed_by = ?1 ORDER BY p.key, i.seq",
+        live()
+    ))?;
+    let rows = stmt.query_map(params![actor], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 /// Clear a claim and record `released` with its reason; old = the holder.

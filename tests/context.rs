@@ -202,16 +202,32 @@ fn a_fresh_task_says_nobody_logged_yet() {
         c["hints"][0],
         "nobody logged on this task yet: apm comment APM-1 \"...\" as you learn things"
     );
-    // A question only on a subtask: answer it on that task.
+    // A question only on a subtask: answer it on that task, named.
     env.json(&["comment", "APM-4", "--kind", "question", "where?"]);
     let c = env.json(&["context", "APM-3"]);
     assert_eq!(
         c["hints"][1],
-        "open questions: answer with apm comment KEY-N --answer ID \"...\""
+        "open questions: answer with apm comment APM-4 --answer ID \"...\""
     );
     let t = text(&env, &["context", "APM-3"]);
-    assert!(t.contains("open questions (answer: apm comment KEY-N --answer ID TEXT):\n"));
+    assert!(t.contains("open questions (answer: apm comment APM-4 --answer ID TEXT):\n"));
     assert!(t.contains(" tester [question] on APM-4: where?\n"), "{t}");
+    // Questions on several tasks: KEY-N.
+    env.json(&["comment", "APM-3", "--kind", "question", "and here?"]);
+    let t = text(&env, &["context", "APM-3"]);
+    assert!(t.contains("open questions (answer: apm comment KEY-N --answer ID TEXT):\n"));
+    // A task whose only entry is an open question has a log: no "nobody logged" hint.
+    env.json(&["comment", "APM-2", "--kind", "question", "anyone?"]);
+    let c = env.json(&["context", "APM-2"]);
+    assert_eq!(c["log_total"], 0);
+    assert!(
+        !c["hints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|h| h.as_str().unwrap().starts_with("nobody")),
+        "{c}"
+    );
     assert_eq!(env.json_err(&["context", "APM-9"]), "no such item: APM-9");
 }
 
@@ -432,8 +448,10 @@ fn project_context_for_a_fresh_session() {
         by_id("APM-3")["handoff"]["body"],
         format!("{}...", "y".repeat(280))
     );
-    assert_eq!(c["more_tasks"], 0);
+    assert_eq!(c["more_active"], 0);
+    assert_eq!(c["more_paused"], 0);
     assert_eq!(c["more_questions"], 0);
+    assert!(tasks.iter().all(|t| t["paused"] == false));
     assert_eq!(
         c["hints"][0],
         "pick up work: apm next -p APM --context (claims the best ready task)"
@@ -480,11 +498,11 @@ fn project_context_stays_small() {
         .success();
     let size = out.get_output().stdout.len();
     let c: Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
-    assert_eq!(c["tasks"].as_array().unwrap().len(), 8);
-    assert_eq!(c["more_tasks"], 17);
-    assert_eq!(c["questions"].as_array().unwrap().len(), 8);
-    assert_eq!(c["more_questions"], 17);
-    assert_eq!(c["pages"].as_array().unwrap().len(), 10);
+    assert_eq!(c["tasks"].as_array().unwrap().len(), 6);
+    assert_eq!(c["more_active"], 19);
+    assert_eq!(c["questions"].as_array().unwrap().len(), 6);
+    assert_eq!(c["more_questions"], 19);
+    assert_eq!(c["pages"].as_array().unwrap().len(), 8);
     let shown = c["pages"].as_array().unwrap().len() as i64;
     assert_eq!(shown + c["more_pages"].as_i64().unwrap(), 30);
     let t = text(&env, &["context", "-p", "APM"]).len();
@@ -557,6 +575,13 @@ fn done_hints_at_an_empty_log() {
         .assert()
         .success()
         .stderr("");
+    // Closing an already closed task changes nothing: no hint.
+    env.apm()
+        .args(["done", "APM-1"])
+        .assert()
+        .success()
+        .stdout("unchanged APM-1 (done)\n")
+        .stderr("");
 }
 
 #[test]
@@ -580,7 +605,7 @@ fn context_help_says_what_it_is_for() {
 }
 
 #[test]
-fn context_lists_at_most_ten_pages() {
+fn context_lists_at_most_eight_pages() {
     let env = Env::new();
     seed(&env);
     for n in 0..12 {
@@ -590,7 +615,215 @@ fn context_lists_at_most_ten_pages() {
     env.json(&["page", "add", "APM:pinned", "t", "--pin"]);
     env.json(&["page", "add", "APM:other", "t"]);
     let c = env.json(&["context", "APM-1"]);
-    assert_eq!(c["pages"].as_array().unwrap().len(), 10);
-    // Not shown: 2 linked, the pinned one, the other one.
-    assert_eq!(c["more_pages"], 4);
+    assert_eq!(c["pages"].as_array().unwrap().len(), 8);
+    // Not shown: 4 linked, the pinned one, the other one.
+    assert_eq!(c["more_pages"], 6);
+}
+
+#[test]
+fn project_context_shows_paused_work_with_a_handoff() {
+    let env = Env::new();
+    seed(&env);
+    // APM-1: in flight. APM-2: started, handed off, put back to todo: paused.
+    // APM-3: todo with a note after its handoff: not paused. APM-4: todo, no log.
+    env.json(&["start", "APM-1"]);
+    env.json(&["start", "APM-2"]);
+    env.json(&[
+        "--as",
+        "alice",
+        "comment",
+        "APM-2",
+        "--kind",
+        "handoff",
+        "stopped at step 2",
+    ]);
+    env.json(&["edit", "APM-2", "--status", "todo"]);
+    env.json(&["comment", "APM-3", "--kind", "handoff", "old"]);
+    env.json(&["comment", "APM-3", "later note"]);
+    let c = env.json(&["context", "-p", "APM"]);
+    let tasks: Vec<(&str, bool)> = c["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| (t["id"].as_str().unwrap(), t["paused"].as_bool().unwrap()))
+        .collect();
+    assert_eq!(tasks, [("APM-1", false), ("APM-2", true)]);
+    assert_eq!(c["tasks"][1]["handoff"]["body"], "stopped at step 2");
+    assert_eq!(c["tasks"][1]["status"], "todo");
+    let t = text(&env, &["context", "-p", "APM"]);
+    assert!(
+        t.contains(
+            "\npaused with a handoff (latest handoff; full: apm context ID):\n  APM-2  todo  two\n"
+        ),
+        "{t}"
+    );
+    assert!(t.contains("      stopped at step 2\n"), "{t}");
+}
+
+#[test]
+fn project_overflow_hints_run() {
+    let env = Env::new();
+    env.json(&["project", "add", "APM", "agent-pm"]);
+    env.json(&[
+        "status",
+        "add",
+        "in review",
+        "-p",
+        "APM",
+        "--category",
+        "active",
+    ]);
+    for n in 1..=10 {
+        env.json(&["add", &format!("t{n}"), "-p", "APM"]);
+        env.json(&["start", &format!("APM-{n}")]);
+    }
+    for n in 11..=17 {
+        env.json(&["add", &format!("t{n}"), "-p", "APM"]);
+        env.json(&["comment", &format!("APM-{n}"), "--kind", "handoff", "h"]);
+    }
+    let c = env.json(&["context", "-p", "APM"]);
+    assert_eq!(c["more_active"], 4);
+    assert_eq!(c["more_paused"], 3);
+    let hints: Vec<&str> = c["hints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h.as_str().unwrap())
+        .collect();
+    let active = "all in-flight tasks: apm list -p APM --status \"doing,blocked,in review\"";
+    let waiting = "all waiting tasks: apm list -p APM --status todo";
+    assert!(hints.contains(&active), "{hints:?}");
+    assert!(hints.contains(&waiting), "{hints:?}");
+    // The printed commands work.
+    let list = env.json(&["list", "-p", "APM", "--status", "doing,blocked,in review"]);
+    assert_eq!(list.as_array().unwrap().len(), 10);
+    let list = env.json(&["list", "-p", "APM", "--status", "todo"]);
+    assert_eq!(list.as_array().unwrap().len(), 7);
+}
+
+#[test]
+fn task_context_bounds_every_list_and_text() {
+    let env = Env::new();
+    seed(&env);
+    let handoff = "h".repeat(3000);
+    env.json(&["comment", "APM-3", "--kind", "handoff", &handoff]);
+    for n in 0..7 {
+        env.json(&[
+            "comment",
+            "APM-3",
+            "--kind",
+            "question",
+            &format!("{n}{}", "q".repeat(700)),
+        ]);
+    }
+    for n in 0..12 {
+        env.json(&["add", &format!("sub {n}"), "--parent", "APM-3"]);
+    }
+    for n in 0..12 {
+        let other = format!("linked {n}");
+        let id = env.json(&["add", &other, "-p", "APM"])["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        env.json(&["link", "APM-3", "relates", &id]);
+    }
+    let c = env.json(&["context", "APM-3"]);
+    assert_eq!(c["handoff"]["truncated"], true);
+    assert_eq!(c["handoff"]["body"], format!("{}...", "h".repeat(2000)));
+    assert_eq!(c["questions"].as_array().unwrap().len(), 5);
+    assert_eq!(c["more_questions"], 2);
+    assert_eq!(c["questions"][0]["truncated"], true);
+    assert_eq!(
+        c["questions"][0]["body"].as_str().unwrap().chars().count(),
+        403
+    );
+    // The listed questions are not repeated in the log; the other two are log entries.
+    assert_eq!(c["log_total"], 2);
+    assert_eq!(c["subtasks"].as_array().unwrap().len(), 8);
+    assert_eq!(c["more_subtasks"], 5); // 12 + APM-4
+    assert_eq!(c["links"]["relates"].as_array().unwrap().len(), 8);
+    assert_eq!(c["more_links"], 4);
+    let t = text(&env, &["context", "APM-3"]);
+    for line in [
+        "\nhandoff (",
+        "; cut, full: apm show APM-3):\n",
+        "    (cut; full: apm show APM-3)\n",
+        "  + 2 more\n",
+        "  + 5 more: apm show APM-3 --tree\n",
+        "\n\nrelates:\n",
+        "  + 4 more links: apm show APM-3\n",
+    ] {
+        assert!(t.contains(line), "{line:?} not in:\n{t}");
+    }
+}
+
+/// Every list at its cap and every text at its cut: the output stays under a fixed bound.
+#[test]
+fn worst_case_contexts_stay_bounded() {
+    let env = Env::new();
+    env.json(&["project", "add", "APM", "agent-pm"]);
+    let long = "w".repeat(5000);
+    let title = "a long task title that goes on for quite a while, as titles do".to_string();
+    env.json(&["add", &title, "-p", "APM", "-b", "short body"]);
+    env.json(&["start", "APM-1"]);
+    for _ in 0..20 {
+        env.json(&["comment", "APM-1", &long]);
+        env.json(&["comment", "APM-1", "--kind", "question", &long]);
+    }
+    env.json(&["comment", "APM-1", "--kind", "handoff", &long]);
+    for n in 0..15 {
+        env.json(&["add", &title, "--parent", "APM-1"]);
+        let id = env.json(&["add", &title, "-p", "APM"])["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        env.json(&["link", "APM-1", "blocks", &id]);
+        let _ = n;
+    }
+    // 31 tasks so far; 15 more in flight and 15 paused, each with a long handoff.
+    for n in 0..30 {
+        let id = env.json(&["add", &title, "-p", "APM"])["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        if n < 15 {
+            env.json(&["start", &id]);
+        }
+        env.json(&["comment", &id, "--kind", "question", &long]);
+        env.json(&["comment", &id, "--kind", "handoff", &long]);
+    }
+    let summary = "s".repeat(200);
+    for n in 0..30 {
+        let id = format!("APM:a-rather-long-page-slug-number-{n:02}");
+        env.json(&[
+            "page", "add", &id, &title, "-s", &summary, "--link", "APM-1", "--pin",
+        ]);
+    }
+    let size = |args: &[&str]| -> usize {
+        let out = env.apm().args(args).assert().success();
+        out.get_output().stdout.len()
+    };
+    let task_json = size(&["--json", "context", "APM-1", "--log", "5"]);
+    let task_text = size(&["context", "APM-1"]);
+    let project_json = size(&["--json", "context", "-p", "APM"]);
+    let project_text = size(&["context", "-p", "APM"]);
+    eprintln!(
+        "worst case: task {task_json} B JSON / {task_text} B text, project {project_json} B JSON / {project_text} B text"
+    );
+    assert!(
+        task_json < 16 * 1024,
+        "task context JSON is {task_json} bytes"
+    );
+    assert!(
+        task_text < 12 * 1024,
+        "task context text is {task_text} bytes"
+    );
+    assert!(
+        project_json < 16 * 1024,
+        "project context JSON is {project_json} bytes"
+    );
+    assert!(
+        project_text < 12 * 1024,
+        "project context text is {project_text} bytes"
+    );
 }

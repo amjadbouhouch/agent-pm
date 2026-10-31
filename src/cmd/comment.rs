@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Args;
-use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, ToSql, params};
 use serde::Serialize;
 
 use super::Ctx;
@@ -176,19 +176,63 @@ pub fn for_item(conn: &Connection, item_id: i64) -> Result<Vec<Comment>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// The questions on these tasks that no comment answers yet, oldest first.
-pub fn open_questions(conn: &Connection, item_ids: &[i64]) -> Result<Vec<Comment>> {
-    if item_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    let marks = vec!["?"; item_ids.len()].join(", ");
+/// Whether a task has any log entry at all.
+pub fn any(conn: &Connection, item_id: i64) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM comments WHERE item_id = ?1)",
+        params![item_id],
+        |r| r.get(0),
+    )?)
+}
+
+/// The questions no comment answers yet on the tasks that `items` selects (SQL returning item
+/// ids, with parameters `args`): the oldest `limit`, and how many there are in all.
+pub fn open_questions(
+    conn: &Connection,
+    items: &str,
+    args: &[&dyn ToSql],
+    limit: usize,
+) -> Result<(Vec<Comment>, i64)> {
+    let filter = format!(
+        "c.item_id IN ({items}) AND c.kind = 'question'
+         AND NOT EXISTS (SELECT 1 FROM comments a WHERE a.answers = c.id)"
+    );
     let mut stmt = conn.prepare(&format!(
-        "{SELECT} WHERE c.item_id IN ({marks}) AND c.kind = 'question'
-           AND NOT EXISTS (SELECT 1 FROM comments a WHERE a.answers = c.id)
-         ORDER BY c.id"
+        "{SELECT} WHERE {filter} ORDER BY c.id LIMIT {limit}"
     ))?;
-    let rows = stmt.query_map(params_from_iter(item_ids), row)?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
+    let rows = stmt
+        .query_map(args, row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let total = conn.query_row(
+        &format!("SELECT count(*) FROM comments c WHERE {filter}"),
+        args,
+        |r| r.get(0),
+    )?;
+    Ok((rows, total))
+}
+
+/// A task's newest `n` comments other than those in `skip`, oldest first, and how many such
+/// comments it has in all.
+pub fn recent(
+    conn: &Connection,
+    item_id: i64,
+    skip: &[i64],
+    n: u32,
+) -> Result<(Vec<Comment>, i64)> {
+    let skip: Vec<String> = skip.iter().map(i64::to_string).collect();
+    let filter = format!("c.item_id = ?1 AND c.id NOT IN ({})", skip.join(", "));
+    let mut stmt = conn.prepare(&format!(
+        "SELECT * FROM ({SELECT} WHERE {filter} ORDER BY c.id DESC LIMIT ?2) ORDER BY 1"
+    ))?;
+    let rows = stmt
+        .query_map(params![item_id, n], row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let total = conn.query_row(
+        &format!("SELECT count(*) FROM comments c WHERE {filter}"),
+        params![item_id],
+        |r| r.get(0),
+    )?;
+    Ok((rows, total))
 }
 
 /// A task's newest comment of a kind (e.g. its latest handoff), if any.
@@ -242,6 +286,14 @@ mod tests {
         comments.iter().map(|c| c.id).collect()
     }
 
+    /// Open question ids on the given tasks (all of them), and the total.
+    fn open(conn: &Connection, tasks: &[i64], limit: usize) -> (Vec<i64>, i64) {
+        let list: Vec<String> = tasks.iter().map(i64::to_string).collect();
+        let items = format!("SELECT id FROM items WHERE id IN ({})", list.join(", "));
+        let (qs, total) = open_questions(conn, &items, &[], limit).unwrap();
+        (ids(&qs), total)
+    }
+
     #[test]
     fn open_questions_are_the_unanswered_ones() {
         let conn = conn(&[
@@ -252,12 +304,15 @@ mod tests {
             (2, "question", None),  // 5: open, on APM-2
             (2, "handoff", None),   // 6
         ]);
-        assert_eq!(ids(&open_questions(&conn, &[1]).unwrap()), [2]);
-        assert_eq!(ids(&open_questions(&conn, &[1, 2]).unwrap()), [2, 5]);
-        assert_eq!(ids(&open_questions(&conn, &[2]).unwrap()), [5]);
-        assert!(open_questions(&conn, &[]).unwrap().is_empty());
-        let q = &open_questions(&conn, &[2]).unwrap()[0];
-        assert_eq!((q.item.as_str(), q.kind), ("APM-2", CommentKind::Question));
+        assert_eq!(open(&conn, &[1], 10), (vec![2], 1));
+        assert_eq!(open(&conn, &[1, 2], 10), (vec![2, 5], 2));
+        assert_eq!(open(&conn, &[1, 2], 1), (vec![2], 2));
+        assert_eq!(open(&conn, &[2], 10), (vec![5], 1));
+        let (qs, _) = open_questions(&conn, "SELECT ?1", &[&2], 10).unwrap();
+        assert_eq!(
+            (qs[0].item.as_str(), qs[0].kind),
+            ("APM-2", CommentKind::Question)
+        );
         // Answering closes it.
         conn.execute(
             "INSERT INTO comments (item_id, author, body, kind, answers)
@@ -265,7 +320,29 @@ mod tests {
             [],
         )
         .unwrap();
-        assert_eq!(ids(&open_questions(&conn, &[1, 2]).unwrap()), [2]);
+        assert_eq!(open(&conn, &[1, 2], 10), (vec![2], 1));
+    }
+
+    #[test]
+    fn recent_is_the_newest_n_but_skipped_ones() {
+        let conn = conn(&[
+            (1, "note", None),
+            (1, "note", None),
+            (1, "handoff", None),
+            (1, "note", None),
+            (2, "note", None),
+        ]);
+        let r = |skip: &[i64], n| {
+            let (c, total) = recent(&conn, 1, skip, n).unwrap();
+            (ids(&c), total)
+        };
+        assert_eq!(r(&[], 2), (vec![3, 4], 4));
+        assert_eq!(r(&[3], 2), (vec![2, 4], 3));
+        assert_eq!(r(&[3], 0), (vec![], 3));
+        assert_eq!(r(&[], 50), (vec![1, 2, 3, 4], 4));
+        assert!(any(&conn, 1).unwrap());
+        conn.execute("INSERT INTO items (id, project_id, seq, title, status_id, created_by) VALUES (3, 1, 3, 't', 1, 'a')", []).unwrap();
+        assert!(!any(&conn, 3).unwrap());
     }
 
     #[test]
