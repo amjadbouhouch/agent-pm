@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## [0.4.0](https://github.com/amjadbouhouch/agent-pm/compare/v0.3.0...v0.4.0) (2026-10-31)
+
+### Features
+
+* **comment:** log kinds, questions and answers ([3a250ad](https://github.com/amjadbouhouch/agent-pm/commit/3a250ad0ccf28255993f872e8f6522a5e2f96fa5))
+* **context:** one-call task and project context for agents ([91e3553](https://github.com/amjadbouhouch/agent-pm/commit/91e35538b53aa34f2e6c2499c92f96a80c2206c5))
+* **page:** project pages with versions, links and search ([2002eaf](https://github.com/amjadbouhouch/agent-pm/commit/2002eaf43001fae2c8c3e8410e7e4be3c24fe6bc))
+* **port:** export pages and log kinds (apm_export 2) ([2ce8fc6](https://github.com/amjadbouhouch/agent-pm/commit/2ce8fc63098d92dcb33a68d0d43b129f3051a945))
+
+### Bug Fixes
+
+* **comment:** usage exit for --answer with --kind, typed kind, #N ids ([f238d57](https://github.com/amjadbouhouch/agent-pm/commit/f238d5778eb0387f312a2733eb58ca1d38ef0a7d))
+* **context:** bounded output, SQL limits, paused work, runnable hints ([3cc2cc3](https://github.com/amjadbouhouch/agent-pm/commit/3cc2cc3b329b88ae310e03047e97bc75b84abfae))
+* **page:** pages then log hits in search, phrase tokens, shared content rules ([07f1efa](https://github.com/amjadbouhouch/agent-pm/commit/07f1efaa0bbb9d2214c74e9b7272be0cafea6d67))
+* **port:** check imported pages with the page commands' content rules ([97ab6b6](https://github.com/amjadbouhouch/agent-pm/commit/97ab6b67240d93738c21ae36bac6a7ffc7a1bf68))
+* **port:** reject an answer that names no question ([5053b5c](https://github.com/amjadbouhouch/agent-pm/commit/5053b5cc6c4ecc913c58d635b49af5bb0012c1e9))
+
 ## [0.3.0](https://github.com/amjadbouhouch/agent-pm/compare/v0.2.0...v0.3.0) (2026-10-22)
 
 ### Features
