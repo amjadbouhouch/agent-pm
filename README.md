@@ -209,4 +209,4 @@ not carried over.
 
 ## License
 
-TBD
+MIT. See [LICENSE](LICENSE).
